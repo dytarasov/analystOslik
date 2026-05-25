@@ -87,6 +87,12 @@ services:
         condition: service_healthy
     env_file:
       - ../backend/.env
+    # Чтобы источник ClickHouse (или любой сервис), поднятый на ХОСТЕ, был
+    # доступен из контейнера: в настройках источника указывай host =
+    # host.docker.internal (а не localhost — внутри контейнера это сам контейнер).
+    # host-gateway делает это имя резолвимым и на Linux, и на Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       T2R_PG_DSN: postgresql+asyncpg://t2r:t2r@postgres:5432/t2r
       T2R_NEO4J_URI: bolt://neo4j:7687
