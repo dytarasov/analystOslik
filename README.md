@@ -1,9 +1,9 @@
-# text-to-report
+# 🫏 Аналитический Ослик
 
-Веб-приложение с двумя пайплайнами поверх ClickHouse:
+Спросите данные обычными словами — Ослик принесёт отчёт. Веб-приложение с двумя пайплайнами поверх ClickHouse:
 
-1. **Админский** — глубоко изучает источник данных, строит семантический слой (PostgreSQL), граф связей (Neo4j) и md-заметки с эмбеддингами (pgvector), задавая админу уточняющие вопросы по каждой таблице.
-2. **Клиентский** — на естественном языке формирует SQL по выбранным таблицам, выполняет его на ClickHouse, отдаёт сводку + превью + выгрузку в XLSX. Все шаги стримятся через SSE — никакого black-box.
+1. **Админский (профилирование)** — глубоко изучает источник данных в два прохода (сухой сбор структуры → групповое LLM-профилирование с инбоксом вопросов), строит семантический слой (PostgreSQL), граф связей (Neo4j) и md-заметки с эмбеддингами (pgvector). Состояние задач durable — прогон возобновляем и ни одна колонка не теряется.
+2. **Клиентский (text → report)** — **агент в ReAct-цикле с нативным OpenAI tool-calling**. Атомарные и «массивные» инструменты дают ему весь ретрив (RAG по заметкам, граф Neo4j, семантический слой, живой просмотр данных) и `run_sql` под guard'ом. Сам решает: ответить сразу, глубоко проанализировать или задать уточняющий вопрос. Диалог живёт в **сессии** — полный thread tool_calls переносится между ходами. Все шаги стримятся через SSE — никакого black-box.
 
 Один общий стек: FastAPI + Dishka + asyncio (бэкенд), Next.js 14 + Tailwind (фронт), Docker Compose для развёртывания.
 
@@ -160,15 +160,15 @@ texttoreport/
 │   │   │   └── export/xlsx.py     — openpyxl writer
 │   │   ├── agents/
 │   │   │   ├── orchestrator/      — AgentRun, Step, Pipeline, EventsBus, Registry
-│   │   │   ├── admin_profiling/   — pipeline + per-table шаги
+│   │   │   ├── admin_profiling/   — two-pass профилирование (pass1/pass2/scheduler)
 │   │   │   ├── admin_edit/        — free-form-команды
-│   │   │   ├── client_task/       — text-to-report
+│   │   │   ├── client_agent/      — ReAct-агент: loop.py, tools.py, deps.py
 │   │   │   ├── tools/             — schema_renderer и т.д.
-│   │   │   └── prompts/*.md       — все промпты (jinja2)
+│   │   │   └── prompts/*.md       — все промпты (jinja2), вкл. client_agent.md
 │   │   └── services/              — task_/profiling_/semantic_/edit_/selection_/source_/session_/auth_
 │   └── tests/
 │       ├── conftest.py
-│       ├── unit/                  — 49 тестов
+│       ├── unit/
 │       └── integration/           — 8 тестов (testcontainers Postgres)
 │
 ├── frontend/
@@ -438,22 +438,31 @@ UI `/admin/sources/[id]/tables/[tableId]`:
 
 ---
 
-## Клиентский пайплайн
+## Клиентский пайплайн (ReAct-агент)
 
-`POST /api/tasks` принимает `{session_id, source_id, prompt}`, возвращает `{task_id, agent_run_id}`. Запись в `task_runs.status='running'`, фоновая asyncio-таска.
+`POST /api/tasks` принимает `{session_id, source_id, prompt}`, возвращает `{task_id, agent_run_id}`. Запись в `task_runs.status='running'`, фоновая asyncio-таска. Вместо жёсткого конвейера — **единственный шаг `ReactAgentStep`** (`agents/client_agent/`), который крутит цикл «рассуждение → вызов инструмента → наблюдение» через нативный OpenAI function-calling (`LLMClient.complete_with_tools`). Процесс зашит в системный промпт `prompts/client_agent.md`.
 
-### Шаги
+### Инструменты (`agents/client_agent/tools.py`)
 
-1. **`ParseIntent`** — промпт `intent_parser.md` возвращает `{intent_type, candidate_tables[], entities[], time_window, metrics[], filters[], ambiguities[]}`.
-2. **`RetrieveContext`** —
-   - kNN по `md_notes.embedding` (pgvector, до 8 заметок).
-   - Берёт `candidate_tables` из intent + target'ы из заметок + fallback топ-10 sem_tables.
-   - Тянет колонки выбранных таблиц → `schema_renderer` рендерит компактный markdown-документ схемы.
-3. **`CheckSufficiency`** — промпт `clarifier.md` решает достаточно ли инфы; если нет — `await_user_input`.
-4. **`GenerateSQL`** — промпт `sql_generator.md`, на вход prompt + intent + schema_doc + notes. Возвращает `{sql, explanation}`.
-5. **`ValidateSQL`** — `sql_guard.validate_and_rewrite()`. Если падает — 1 retry через `sql_fixer.md`.
-6. **`ExecuteSQL`** — `clickhouse-connect` с `SETTINGS max_execution_time=… max_result_rows=…`.
-7. **`SummarizeAndPersist`** — `result_summarizer.md` пишет сводку; превью первых 50 строк → `task_runs.result_preview`; полный результат → XLSX (openpyxl); эмитит `result.final`.
+| Тул | Что делает |
+|---|---|
+| `list_tables` | дешёвый обзор таблиц (qname/title/grain/rows) |
+| `get_table` | таблица + **все** колонки с семантикой (роли, value_catalog, диапазоны, ключи) |
+| `get_columns` | точечный drill-down по колонкам (value_meanings, caveats, PII) |
+| `search_knowledge` | **RAG**: kNN по `md_notes` через эмбеддинги |
+| `find_relations` | прямые связи из `sem_relations` (+ cardinality / match_ratio) |
+| `related_tables` | **граф Neo4j**: многоходовые связи (1–2 перехода) для JOIN через промежуточные таблицы |
+| `glossary_lookup` / `list_metrics` | канонические термины и предопределённые метрики |
+| `sample_rows` / `distinct_values` | **живой** просмотр данных ClickHouse (через `CHProfiler`) |
+| `run_sql` | guard **зашит внутрь** (whitelist/LIMIT/timeout) → exec → колонки + строки |
+| `ask_user` | пауза на уточняющий вопрос (через `await_user_input`) |
+| `finish` | терминал: итоговый ответ + выбор результата для preview/XLSX |
+
+### Непрерывность сессии
+
+Полный OpenAI-thread (assistant `tool_calls` + tool-наблюдения + ответы) сохраняется в таблице `agent_messages` (миграция `0020`) и **реиграется на каждом ходу** — follow-up продолжает контекст, а не исследует заново. Обрезка по границам ходов (`MAX_THREAD_TURNS`) + бюджет символов (`THREAD_CHAR_BUDGET`) держат контекст под лимитом. `chat_messages` остаётся для отрисовки UI.
+
+Рамки безопасности: лимит итераций / `run_sql`, guard внутри `run_sql` (модель не может обойти), терминальный `finish` контролирует конец и формат. На `finish` — превью первых 50 строк → `task_runs.result_preview`, полный результат → XLSX (openpyxl), эмит `result.final`.
 
 ---
 
@@ -522,18 +531,9 @@ Neo4j 5 хранит:
 | `(:Concept)-[:DESCRIBES]->(:Table or :Column)` | — |
 | `(:Table)-[:BELONGS_TO_DOMAIN]->(:Domain)` | — |
 
-### UI
+### Назначение
 
-`/admin/sources/[id]/graph` (cytoscape.js):
-
-- 5 раскладок: **cose-bilkent** (knowledge graph, по умолчанию), fcose, concentric, dagre LR, grid.
-- **Compound-кластеры по домену** (полупрозрачные капсулы).
-- **Узлы — эллипсы**, размер ∝ log(column_count), цвет = домен.
-- **Рёбра по типам**: FK = solid зелёные, inferred = dashed золотые, conceptual = dotted фиолетовые. Толщина ∝ confidence.
-- Подписи `col → col` появляются при hover/select.
-- Search → центрирует найденную таблицу.
-- Toggle inferred / кластеров, zoom, fit.
-- Sidebar 320px с деталями + кнопкой «Открыть редактор таблицы».
+Граф существует **только в Neo4j и только для инструментов агента** — фронтовая визуализация графа удалена как бесполезная на данном этапе. Клиентский агент ходит в граф тулом `related_tables` (многоходовые связи для JOIN). Материализация Neo4j из семантического слоя PG — через `POST /api/admin/sources/{id}/graph/resync` (бэкфилл/восстановление).
 
 ---
 
@@ -631,14 +631,13 @@ Neo4j 5 хранит:
 | `/admin/sources/[id]` | детали: выбор таблиц + запуски + сем-слой |
 | `/admin/sources/[id]/runs/[runId]` | live SSE-таймлайн с clarification |
 | `/admin/sources/[id]/tables/[tableId]` | редактор + Regenerate |
-| `/admin/sources/[id]/graph` | knowledge graph |
 | `/admin/sources/[id]/chat` | свободная команда админ-агенту |
 
 ---
 
 ## Тесты
 
-### Backend (70 тестов)
+### Backend
 
 ```bash
 cd backend
@@ -646,34 +645,24 @@ uv pip install -p .venv/bin/python -e ".[test]"
 TESTCONTAINERS_RYUK_DISABLED=true .venv/bin/python -m pytest -q
 ```
 
-**Unit (49)** — `tests/unit/`:
-- `test_sql_guard.py` — whitelist/auto-LIMIT/forbidden funcs/DDL reject
-- `test_json_extractor.py` — парсер ответов LLM
-- `test_cipher.py`, `test_passwords.py`, `test_jwt.py`
-- `test_events_bus.py` — replay, Last-Event-ID, close
-- `test_pipeline.py` — success/failure/await_user_input/cancel
-- `test_prompt_loader.py`, `test_xlsx.py`, `test_schema_renderer.py`
-- `test_auth_service.py`, `test_session_service.py`
+**Unit** — `tests/unit/`, в т.ч.:
+- `test_client_agent.py` — ReAct-цикл (explore → run_sql → finish), plain-text→finish, пауза/resume на `ask_user`, реплей+сохранение сессионного thread, обрезка контекста по ходам/бюджету, guard внутри `run_sql`, граф-тул `related_tables`
+- `test_sql_guard.py` — whitelist / auto-LIMIT / forbidden funcs / DDL reject
+- `test_json_extractor.py`, `test_events_bus.py` (replay/Last-Event-ID), `test_pipeline.py` (success/failure/await_user_input/cancel)
+- `test_pass1_heuristics.py`, `test_pass2_grouping.py`, `test_profiling_enrichment.py` — профилирование
+- `test_cipher.py`, `test_passwords.py`, `test_jwt.py`, `test_prompt_loader.py`, `test_xlsx.py`, `test_schema_renderer.py`, `test_auth_service.py`, `test_session_service.py`
 
-**Integration (8)** — `tests/integration/`, Postgres через testcontainers:
-- `test_migrations.py` — все миграции применяются, vector extension работает
-- `test_admin_auth.py` — login → me → logout
-- `test_sources_crud.py` — CRUD + readonly probe
-- `test_health.py` — /healthz, /readyz
-- `test_audit_and_tables.py` — PATCH пишет в sem_revisions
-- `test_demo_sse.py` — end-to-end SSE поток
+**Integration** — `tests/integration/`, Postgres через testcontainers:
+- `test_migrations.py`, `test_admin_auth.py`, `test_sources_crud.py`, `test_health.py`, `test_audit_and_tables.py`, `test_demo_sse.py`
+- `test_profiling_v2.py`, `test_profiling_tasks.py`, `test_pass2.py`, `test_profiling_uniqueness.py`
 
-### Frontend (13 тестов)
+### Frontend
 
 ```bash
 cd frontend
-npm test
+npm test          # vitest
+npx tsc --noEmit  # typecheck
 ```
-
-- `tests/sse.test.ts` — парсер, heartbeat
-- `tests/useTask.test.tsx` — FSM, awaiting_input, error, custom onEvent
-- `tests/TablePreview.test.tsx`, `tests/ClarificationForm.test.tsx`
-- `tests/api.test.ts` — login body, HttpError на 401
 
 ---
 
