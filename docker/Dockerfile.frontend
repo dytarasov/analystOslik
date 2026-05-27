@@ -12,4 +12,10 @@ ENV CHOKIDAR_USEPOLLING=true
 
 EXPOSE 3000
 
-CMD ["npm", "run", "dev"]
+# node_modules — это named volume (см. docker-compose.yml), который переживает
+# ребилды образа: Docker не перезаписывает уже существующий volume содержимым
+# свежего образа. Поэтому при изменении зависимостей одного `compose build` мало —
+# делаем `npm install` на старте, чтобы примирить смонтированный volume с
+# package.json (доставит недостающие пакеты вроде prismjs). Install инкрементный,
+# так что на неизменном volume это почти мгновенно.
+CMD ["sh", "-c", "npm install && npm run dev"]
