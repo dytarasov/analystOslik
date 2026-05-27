@@ -64,20 +64,41 @@ class ToolContext:
         self.results: dict[str, StoredResult] = {}
         self._query_seq = 0
         self._columns_cache: dict[Any, list[dict[str, Any]]] = {}
+        self._guard_maps: tuple[dict[str, list[str]], dict[str, set[str]]] | None = None
 
     def next_query_id(self) -> str:
         self._query_seq += 1
         return f"q{self._query_seq}"
 
     async def columns_of(self, table_id: Any) -> list[dict[str, Any]]:
+        # Agent-facing: disabled columns are invisible everywhere the agent looks
+        # (get_table / get_columns / schema render / relation name resolution).
         if table_id not in self._columns_cache:
             self._columns_cache[table_id] = await self.deps.semantic_repo.get_columns(
-                table_id
+                table_id, only_enabled=True
             )
         return self._columns_cache[table_id]
 
     def resolve_qname(self, qname: str) -> dict[str, Any] | None:
         return self.by_qname.get(qname)
+
+    async def column_guard_maps(
+        self,
+    ) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
+        """(enabled_columns, disabled_columns) keyed by qname, for the SQL guard.
+        Only tables that actually have a disabled column appear in either map, so
+        the guard does no work for sources with nothing excluded."""
+        if self._guard_maps is None:
+            enabled: dict[str, list[str]] = {}
+            disabled: dict[str, set[str]] = {}
+            for qn, t in self.by_qname.items():
+                cols = await self.deps.semantic_repo.get_columns(t["id"])  # all
+                dis = {c["name"] for c in cols if not c.get("enabled", True)}
+                if dis:
+                    disabled[qn] = dis
+                    enabled[qn] = [c["name"] for c in cols if c.get("enabled", True)]
+            self._guard_maps = (enabled, disabled)
+        return self._guard_maps
 
 
 @dataclass
@@ -179,7 +200,7 @@ async def _find_relations(ctx: ToolContext, args: dict[str, Any]) -> Any:
     if not t:
         return {"error": f"Таблица {qname!r} не входит в источник."}
     tid = t["id"]
-    rels = await ctx.deps.semantic_repo.get_relations(ctx.source_id)
+    rels = await ctx.deps.semantic_repo.get_relations(ctx.source_id, only_enabled=True)
     out = []
     for r in rels:
         if r["from_table_id"] != tid and r["to_table_id"] != tid:
@@ -259,6 +280,9 @@ async def _distinct_values(ctx: ToolContext, args: dict[str, Any]) -> Any:
         return {"error": f"Таблица {qname!r} не входит в источник."}
     if not column:
         return {"error": "column обязателен"}
+    # Disabled columns are out of scope — only probe enabled ones.
+    if column not in {c["name"] for c in await ctx.columns_of(t["id"])}:
+        return {"error": f"Колонка {column!r} недоступна в {qname}."}
     client = await ctx.deps.ch_factory.for_source(ctx.source_id)
     try:
         profiler = CHProfiler(client)
@@ -274,10 +298,13 @@ async def _run_sql(ctx: ToolContext, args: dict[str, Any]) -> Any:
     sql = (args.get("sql") or "").strip()
     if not sql:
         return {"error": "sql пустой", "kind": "guard"}
+    enabled_cols, disabled_cols = await ctx.column_guard_maps()
     try:
         guard = validate_and_rewrite(
             sql,
             whitelist_qnames=ctx.whitelist,
+            enabled_columns=enabled_cols,
+            disabled_columns=disabled_cols,
             default_limit=ctx.deps.ch_default_limit,
             max_execution_time=ctx.deps.ch_max_execution_time,
         )
@@ -313,6 +340,39 @@ async def _ask_user(ctx: ToolContext, args: dict[str, Any]) -> Any:
     question = (args.get("question") or "").strip()
     choices = args.get("choices") or None
     schema = {"choices": choices} if choices else None
+    answer = await ctx.run.await_user_input(question, schema)
+    return {"answer": answer}
+
+
+async def _confirm_plan(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    """Restate the understood task in PLAIN language and wait for a yes/no before
+    writing SQL. The text is meant for a non-technical product manager — no table
+    or column names. Pauses the run with Да/Нет choices (rendered as buttons)."""
+    understanding = (args.get("understanding") or "").strip()
+    filters = (args.get("filters") or "").strip()
+    grain = (args.get("grain") or "").strip()
+
+    # Markdown — the frontend renders this with the same Markdown component as the
+    # final answer. Lead sentence, then plain-worded bullets for period & breakdown.
+    parts: list[str] = []
+    if understanding:
+        parts.append(understanding)
+    bullets: list[str] = []
+    if filters:
+        bullets.append(f"**За какой период / по каким данным:** {filters}")
+    if grain:
+        bullets.append(f"**Как разобьём результат:** {grain}")
+    if bullets:
+        parts.append("\n".join(f"- {b}" for b in bullets))
+    question = "\n\n".join(parts) if parts else "Правильно понял задачу?"
+
+    schema = {
+        "kind": "plan",
+        "choices": ["Да, считаем", "Нет — поправлю"],
+        "understanding": understanding,
+        "filters": filters,
+        "grain": grain,
+    }
     answer = await ctx.run.await_user_input(question, schema)
     return {"answer": answer}
 
@@ -545,6 +605,48 @@ def build_registry() -> dict[str, Tool]:
             ),
             handler=_run_sql,
             label=lambda a: "Выполняю SQL",
+        ),
+        Tool(
+            name="confirm_plan",
+            schema=_fn(
+                "confirm_plan",
+                "ОБЯЗАТЕЛЬНО перед написанием SQL: простыми словами переформулируй, "
+                "как ты понял задачу, и дождись подтверждения. Пиши так, чтобы понял "
+                "продакт, который НИКОГДА не видел SQL: НИКАКИХ названий таблиц, "
+                "колонок, функций и технических терминов — только бизнес-смысл. "
+                "Вызывай ТОЛЬКО после изучения схемы/заметок. Пользователь ответит "
+                "«Да, считаем» или поправит.",
+                {
+                    "type": _OBJ,
+                    "properties": {
+                        "understanding": {
+                            **_STR,
+                            "description": (
+                                "Что именно посчитаем или покажем — простыми словами для "
+                                "непрофессионала, без названий таблиц/колонок и SQL-терминов"
+                            ),
+                        },
+                        "filters": {
+                            **_STR,
+                            "description": (
+                                "За какой период и по каким данным считаем — простыми "
+                                "словами (если уместно)"
+                            ),
+                        },
+                        "grain": {
+                            **_STR,
+                            "description": (
+                                "Как разобьём результат — простыми словами, напр. «по "
+                                "месяцам», «по городам» (если уместно)"
+                            ),
+                        },
+                    },
+                    "required": ["understanding"],
+                },
+            ),
+            handler=_confirm_plan,
+            label=lambda a: "Уточняю постановку задачи",
+            interactive=True,
         ),
         Tool(
             name="ask_user",

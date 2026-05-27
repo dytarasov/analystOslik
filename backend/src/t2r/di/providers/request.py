@@ -4,7 +4,6 @@ from dishka import Provider, Scope, provide
 from neo4j import AsyncDriver
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from t2r.agents.orchestrator.registry import RunRegistry
 from t2r.infra.db.repos.notes_repo_pg import NotesRepoPg
 from t2r.infra.db.repos.profiling_repo_pg import ProfilingRepoPg
 from t2r.infra.db.repos.selection_repo_pg import SelectionRepoPg
@@ -15,15 +14,10 @@ from t2r.infra.llm.embeddings import EmbeddingsClient
 from t2r.infra.llm.openai_client import LLMClient
 from t2r.infra.llm.prompt_loader import PromptLoader
 from t2r.infra.security.cipher import FernetCipher
-from t2r.services.edit_service import EditService
-from t2r.services.profiling_service import ProfilingService
-from t2r.services.selection_service import SelectionService
+from t2r.services.glossary_service import GlossaryService
 from t2r.services.semantic_service import SemanticService
 from t2r.services.session_service import SessionService
 from t2r.services.source_service import SourceService
-from t2r.services.table_chat_service import TableChatService
-from t2r.services.task_service import TaskService
-from t2r.settings import Settings
 
 
 class RequestProvider(Provider):
@@ -66,95 +60,42 @@ class RequestProvider(Provider):
         return SelectionRepoPg(session)
 
     @provide
-    def selection_service(
+    def source_service(
+        self, repo: SourceRepoPg, graph_repo: GraphRepoNeo4j
+    ) -> SourceService:
+        return SourceService(repo, graph_repo)
+
+    @provide
+    def glossary_service(
         self,
-        sm: async_sessionmaker[AsyncSession],
-        cipher: FernetCipher,
-    ) -> SelectionService:
-        return SelectionService(sessionmaker=sm, cipher=cipher)
-
-    @provide
-    def source_service(self, repo: SourceRepoPg) -> SourceService:
-        return SourceService(repo)
-
-    @provide
-    def semantic_service(self, repo: SemanticRepoPg) -> SemanticService:
-        return SemanticService(repo)
-
-    @provide
-    def profiling_service(
-        self,
-        sm: async_sessionmaker[AsyncSession],
-        cipher: FernetCipher,
-        driver: AsyncDriver,
-        llm: LLMClient,
+        source_repo: SourceRepoPg,
+        semantic_repo: SemanticRepoPg,
+        notes_repo: NotesRepoPg,
+        graph_repo: GraphRepoNeo4j,
         emb: EmbeddingsClient,
+        llm: LLMClient,
         prompts: PromptLoader,
-        registry: RunRegistry,
-    ) -> ProfilingService:
-        return ProfilingService(
-            sessionmaker=sm,
-            cipher=cipher,
-            neo4j_driver=driver,
-            llm=llm,
+    ) -> GlossaryService:
+        return GlossaryService(
+            source_repo=source_repo,
+            semantic_repo=semantic_repo,
+            notes_repo=notes_repo,
+            graph_repo=graph_repo,
             embeddings=emb,
+            llm=llm,
             prompts=prompts,
-            registry=registry,
         )
 
     @provide
-    def edit_service(
+    def semantic_service(
         self,
-        sm: async_sessionmaker[AsyncSession],
-        llm: LLMClient,
-        prompts: PromptLoader,
-        registry: RunRegistry,
-    ) -> EditService:
-        return EditService(
-            sessionmaker=sm,
-            llm=llm,
-            prompts=prompts,
-            registry=registry,
-        )
-
-    @provide
-    def table_chat_service(
-        self,
-        sm: async_sessionmaker[AsyncSession],
-        llm: LLMClient,
-        prompts: PromptLoader,
-        registry: RunRegistry,
-    ) -> TableChatService:
-        return TableChatService(
-            sessionmaker=sm,
-            llm=llm,
-            prompts=prompts,
-            registry=registry,
-        )
+        repo: SemanticRepoPg,
+        graph_repo: GraphRepoNeo4j,
+        notes_repo: NotesRepoPg,
+        emb: EmbeddingsClient,
+    ) -> SemanticService:
+        return SemanticService(repo, graph_repo, notes_repo, emb)
 
     @provide
     def session_service(self, session: AsyncSession) -> SessionService:
         return SessionService(session)
-
-    @provide
-    def task_service(
-        self,
-        sm: async_sessionmaker[AsyncSession],
-        cipher: FernetCipher,
-        driver: AsyncDriver,
-        llm: LLMClient,
-        emb: EmbeddingsClient,
-        prompts: PromptLoader,
-        registry: RunRegistry,
-        settings: Settings,
-    ) -> TaskService:
-        return TaskService(
-            sessionmaker=sm,
-            cipher=cipher,
-            neo4j_driver=driver,
-            llm=llm,
-            embeddings=emb,
-            prompts=prompts,
-            registry=registry,
-            settings=settings,
-        )

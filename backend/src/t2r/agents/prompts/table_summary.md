@@ -6,7 +6,10 @@
 Колонки (имя : тип · роль · distinct/null{% raw %}{% endraw %}):
 {% for c in columns %}- `{{ c.name }}` : {{ c.data_type }} · {{ c.semantic_role or '—' }} · distinct={{ c.distinct_count }} null={{ c.null_ratio }}{% if c.catalog_sample %} · значения: {{ c.catalog_sample }}{% endif %}
 {% endfor %}
-
+{% if glossary %}
+Глоссарий источника (авторитетные определения от человека — опирайся на них, приоритетнее догадок):
+{{ glossary }}
+{% endif %}
 Верни строго JSON (без markdown):
 ```
 {

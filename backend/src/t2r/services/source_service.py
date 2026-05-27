@@ -12,11 +12,16 @@ from t2r.errors import NotFoundError, UpstreamError
 from t2r.infra.clickhouse.client import make_ch_client
 from t2r.infra.clickhouse.permissions import probe_readonly
 from t2r.infra.db.repos.source_repo_pg import SourceRepoPg
+from t2r.infra.graph.repo import GraphRepoNeo4j
+from t2r.logging import get_logger
+
+logger = get_logger("source_service")
 
 
 class SourceService:
-    def __init__(self, repo: SourceRepoPg) -> None:
+    def __init__(self, repo: SourceRepoPg, graph: GraphRepoNeo4j) -> None:
         self.repo = repo
+        self.graph = graph
 
     async def list(self) -> list[DataSource]:
         return await self.repo.list()
@@ -53,6 +58,7 @@ class SourceService:
             password=payload.password,
             secure=payload.secure,
             extra_settings=payload.extra_settings,
+            glossary_md=payload.glossary_md,
         )
         if not updated:
             raise NotFoundError("Источник не найден")
@@ -60,6 +66,11 @@ class SourceService:
 
     async def delete(self, source_id: UUID) -> None:
         await self.repo.delete(source_id)
+        # PG cascades; Neo4j has no FK, so drop its nodes explicitly (best-effort).
+        try:
+            await self.graph.delete_source(str(source_id))
+        except Exception:  # noqa: BLE001
+            logger.exception("graph cleanup on source delete failed", source_id=str(source_id))
 
     async def test_connection(self, source_id: UUID) -> TestConnectionResult:
         src = await self.get(source_id)

@@ -13,6 +13,11 @@ from t2r.infra.llm.prompt_loader import PromptLoader
 from t2r.infra.security.cipher import FernetCipher
 from t2r.infra.security.jwt import JwtCodec
 from t2r.services.auth_service import AuthService
+from t2r.services.edit_service import EditService
+from t2r.services.profiling_service import ProfilingService
+from t2r.services.selection_service import SelectionService
+from t2r.services.table_chat_service import TableChatService
+from t2r.services.task_service import TaskService
 from t2r.settings import Settings, get_settings
 
 
@@ -63,6 +68,7 @@ class AppProvider(Provider):
             model=settings.llm_model,
             temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
+            openrouter_provider=settings.llm_openrouter_provider,
         )
 
     @provide
@@ -81,3 +87,94 @@ class AppProvider(Provider):
     @provide
     def run_registry(self) -> RunRegistry:
         return RunRegistry()
+
+    # Services below own their DB sessions via the sessionmaker (they spawn
+    # background agent runs that outlive the HTTP request, so they must NOT use
+    # the request-scoped session). They depend only on APP-scoped singletons and
+    # hold no per-request state — hence APP scope. Services that read/write the
+    # request session live in RequestProvider instead.
+    @provide
+    def selection_service(
+        self,
+        sm: async_sessionmaker[AsyncSession],
+        cipher: FernetCipher,
+    ) -> SelectionService:
+        return SelectionService(sessionmaker=sm, cipher=cipher)
+
+    @provide
+    def profiling_service(
+        self,
+        sm: async_sessionmaker[AsyncSession],
+        cipher: FernetCipher,
+        driver: AsyncDriver,
+        llm: LLMClient,
+        emb: EmbeddingsClient,
+        prompts: PromptLoader,
+        registry: RunRegistry,
+    ) -> ProfilingService:
+        return ProfilingService(
+            sessionmaker=sm,
+            cipher=cipher,
+            neo4j_driver=driver,
+            llm=llm,
+            embeddings=emb,
+            prompts=prompts,
+            registry=registry,
+        )
+
+    @provide
+    def edit_service(
+        self,
+        sm: async_sessionmaker[AsyncSession],
+        driver: AsyncDriver,
+        llm: LLMClient,
+        prompts: PromptLoader,
+        registry: RunRegistry,
+    ) -> EditService:
+        return EditService(
+            sessionmaker=sm,
+            neo4j_driver=driver,
+            llm=llm,
+            prompts=prompts,
+            registry=registry,
+        )
+
+    @provide
+    def table_chat_service(
+        self,
+        sm: async_sessionmaker[AsyncSession],
+        driver: AsyncDriver,
+        llm: LLMClient,
+        prompts: PromptLoader,
+        registry: RunRegistry,
+    ) -> TableChatService:
+        return TableChatService(
+            sessionmaker=sm,
+            neo4j_driver=driver,
+            llm=llm,
+            prompts=prompts,
+            registry=registry,
+        )
+
+    @provide
+    def task_service(
+        self,
+        sm: async_sessionmaker[AsyncSession],
+        cipher: FernetCipher,
+        driver: AsyncDriver,
+        llm: LLMClient,
+        emb: EmbeddingsClient,
+        prompts: PromptLoader,
+        registry: RunRegistry,
+        settings: Settings,
+    ) -> TaskService:
+        return TaskService(
+            sessionmaker=sm,
+            cipher=cipher,
+            neo4j_driver=driver,
+            llm=llm,
+            embeddings=emb,
+            prompts=prompts,
+            registry=registry,
+            settings=settings,
+        )

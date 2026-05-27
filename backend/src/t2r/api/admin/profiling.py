@@ -173,3 +173,34 @@ async def answer_question(
     return await svc.answer_question(
         task_id, [a.model_dump() for a in payload.answers]
     )
+
+
+@router.get("/runs/{run_id}/column-selection")
+@inject
+async def get_column_selection(
+    run_id: UUID, svc: FromDishka[ProfilingService]
+) -> dict:
+    """Dry-harvest snapshot for the column-selection gate (tables + columns)."""
+    return await svc.get_column_selection(run_id)
+
+
+class DisabledTable(BaseModel):
+    table_id: UUID
+    names: list[str]
+
+
+class ColumnSelectionRequest(BaseModel):
+    disabled: list[DisabledTable] = []
+
+
+@router.post("/runs/{run_id}/column-selection")
+@inject
+async def apply_column_selection(
+    run_id: UUID,
+    payload: ColumnSelectionRequest,
+    svc: FromDishka[ProfilingService],
+) -> dict:
+    """Apply the admin's column exclusions and resume into deep profiling."""
+    return await svc.apply_column_selection(
+        run_id, [d.model_dump() for d in payload.disabled]
+    )

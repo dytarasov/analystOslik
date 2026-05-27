@@ -63,27 +63,29 @@ export default function NewSourcePage() {
 
   return (
     <div className="mx-auto max-w-2xl">
-      <Card>
+      <Card className="brackets">
         <CardHeader>
-          <CardTitle>Новый источник ClickHouse</CardTitle>
+          <span className="label-mono">подключение · clickhouse</span>
+          <CardTitle className="pt-1">Новый источник ClickHouse</CardTitle>
           <CardDescription>Подключение к серверу будет проверено и записано зашифрованно.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Название</Label>
+              <Label htmlFor="name" className="label-mono">название</Label>
               <Input id="name" value={form.name} onChange={(e) => update("name", e.target.value)} required />
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="host">Host</Label>
-                <Input id="host" value={form.host} onChange={(e) => update("host", e.target.value)} required />
+                <Label htmlFor="host" className="label-mono">host</Label>
+                <Input id="host" className="font-mono" value={form.host} onChange={(e) => update("host", e.target.value)} required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="port">Port</Label>
+                <Label htmlFor="port" className="label-mono">port</Label>
                 <Input
                   id="port"
                   type="number"
+                  className="font-mono"
                   value={form.port}
                   onChange={(e) => update("port", Number(e.target.value))}
                   required
@@ -91,19 +93,20 @@ export default function NewSourcePage() {
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="database">Database</Label>
-              <Input id="database" value={form.database} onChange={(e) => update("database", e.target.value)} required />
+              <Label htmlFor="database" className="label-mono">database</Label>
+              <Input id="database" className="font-mono" value={form.database} onChange={(e) => update("database", e.target.value)} required />
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="username">Username</Label>
-                <Input id="username" value={form.username} onChange={(e) => update("username", e.target.value)} required />
+                <Label htmlFor="username" className="label-mono">username</Label>
+                <Input id="username" className="font-mono" value={form.username} onChange={(e) => update("username", e.target.value)} required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
+                <Label htmlFor="password" className="label-mono">password</Label>
                 <Input
                   id="password"
                   type="password"
+                  className="font-mono"
                   value={form.password}
                   onChange={(e) => update("password", e.target.value)}
                   required
@@ -114,17 +117,18 @@ export default function NewSourcePage() {
               <input
                 id="secure"
                 type="checkbox"
+                className="accent-primary"
                 checked={form.secure}
                 onChange={(e) => update("secure", e.target.checked)}
               />
-              <Label htmlFor="secure">HTTPS</Label>
+              <Label htmlFor="secure" className="label-mono">https</Label>
             </div>
             <div className="flex gap-3 pt-2">
-              <Button type="button" variant="outline" onClick={onTest} disabled={testing}>
+              <Button type="button" variant="outline" className="font-mono" onClick={onTest} disabled={testing}>
                 {testing ? "Проверка…" : "Тест подключения"}
               </Button>
-              <Button type="submit" disabled={submitting}>
-                {submitting ? "Сохранение…" : "Создать"}
+              <Button type="submit" className="font-mono" disabled={submitting}>
+                {submitting ? "Сохранение…" : "Создать →"}
               </Button>
             </div>
           </form>

@@ -14,6 +14,7 @@ _SOURCE_COLUMNS = (
     "id, name, kind, host, port, database, username, secure,"
     " extra_settings, readonly_verified, last_test_at, last_test_status,"
     " last_test_error, last_profiling_run_id, last_profiled_at, profiling_status,"
+    " glossary_md, glossary_ingested_at,"
     " created_at, updated_at"
 )
 
@@ -36,6 +37,8 @@ def _row_to_source(row: Any) -> DataSource:
         last_profiling_run_id=getattr(row, "last_profiling_run_id", None),
         last_profiled_at=getattr(row, "last_profiled_at", None),
         profiling_status=getattr(row, "profiling_status", "never_profiled") or "never_profiled",
+        glossary_md=getattr(row, "glossary_md", None),
+        glossary_ingested_at=getattr(row, "glossary_ingested_at", None),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -129,11 +132,14 @@ class SourceRepoPg:
         password: str | None = None,
         secure: bool | None = None,
         extra_settings: dict[str, Any] | None = None,
+        glossary_md: str | None = None,
     ) -> DataSource | None:
         """Partial update. Only provided fields are changed. An empty/None
         password is ignored (keeps the existing encrypted secret). If any
         connection-affecting field changes, the readonly/test verdict is reset
-        — it no longer reflects the new endpoint until re-tested.
+        — it no longer reflects the new endpoint until re-tested. Editing the
+        glossary clears ``glossary_ingested_at`` so the admin sees it needs a
+        re-ingest; it is NOT connection-affecting.
         """
         sets: list[str] = []
         params: dict[str, Any] = {"id": source_id}
@@ -158,6 +164,10 @@ class SourceRepoPg:
         if extra_settings is not None:
             sets.append("extra_settings = CAST(:extra_settings AS jsonb)")
             params["extra_settings"] = __import__("json").dumps(extra_settings)
+        if glossary_md is not None:
+            sets.append("glossary_md = :glossary_md")
+            sets.append("glossary_ingested_at = NULL")
+            params["glossary_md"] = glossary_md
         password_changed = password is not None and password != ""
         if password_changed:
             sets.append("password_encrypted = :pwd")
@@ -187,6 +197,16 @@ class SourceRepoPg:
         if not row:
             return None
         return _row_to_source(type("R", (), dict(row)))
+
+    async def set_glossary_ingested(self, source_id: UUID) -> None:
+        """Mark the current glossary as structurally ingested just now."""
+        await self.session.execute(
+            text(
+                "UPDATE data_sources SET glossary_ingested_at = now(),"
+                " updated_at = now() WHERE id = :id"
+            ),
+            {"id": source_id},
+        )
 
     async def update_test_status(
         self,

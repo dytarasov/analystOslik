@@ -18,6 +18,7 @@ import re
 from typing import Any
 from uuid import UUID
 
+from neo4j import AsyncDriver
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,6 +29,8 @@ from t2r.agents.orchestrator.step import Step
 from t2r.domain.events.types import llm_token, result_final, step_progress
 from t2r.errors import NotFoundError
 from t2r.infra.db.repos.semantic_repo_pg import SemanticRepoPg
+from t2r.infra.graph.repo import GraphRepoNeo4j
+from t2r.infra.graph.sync import try_resync_source_graph
 from t2r.infra.llm.openai_client import LLMClient
 from t2r.infra.llm.prompt_loader import PromptLoader
 from t2r.logging import get_logger
@@ -89,7 +92,7 @@ class _AskTableStep(Step):
             temperature=0.2,
         ):
             reply_chunks.append(token)
-            await run.emit(llm_token(token))
+            await run.emit(llm_token(self.step_id, token))
 
         reply = "".join(reply_chunks).strip()
         actions = _extract_actions(reply)
@@ -277,11 +280,13 @@ class TableChatService:
         self,
         *,
         sessionmaker: async_sessionmaker[AsyncSession],
+        neo4j_driver: AsyncDriver,
         llm: LLMClient,
         prompts: PromptLoader,
         registry: RunRegistry,
     ) -> None:
         self.sm = sessionmaker
+        self.driver = neo4j_driver
         self.llm = llm
         self.prompts = prompts
         self.registry = registry
@@ -352,6 +357,13 @@ class TableChatService:
                 )
                 pipeline = Pipeline([step])
                 await pipeline.run(agent_run)
+                # Applied edits (table/column roles, tags) must reach Neo4j.
+                repo = SemanticRepoPg(session)
+                tbl = await repo.get_table(table_id)
+                if tbl:
+                    await try_resync_source_graph(
+                        repo, GraphRepoNeo4j(self.driver), tbl["source_id"]
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.exception("table_chat failed")
             await agent_run.finalize(error=str(exc))

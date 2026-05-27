@@ -22,8 +22,20 @@ export type DataSource = {
   last_profiling_run_id: string | null;
   last_profiled_at: string | null;
   profiling_status: ProfilingStatus;
+  glossary_md: string | null;
+  glossary_ingested_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type GlossaryIngestResult = {
+  ok: boolean;
+  notes: number;
+  metrics: number;
+  terms: number;
+  columns: number;
+  relations: number;
+  warnings: string[];
 };
 
 export type DataSourceCreate = {
@@ -48,6 +60,8 @@ export type DataSourceUpdate = {
   password?: string;
   secure?: boolean;
   extra_settings?: Record<string, unknown>;
+  // Provided (even "") sets the glossary; omitted leaves it unchanged.
+  glossary_md?: string;
 };
 
 export type TestConnectionResult = {

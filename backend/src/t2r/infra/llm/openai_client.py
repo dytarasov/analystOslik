@@ -53,11 +53,24 @@ class LLMClient:
         model: str,
         temperature: float = 0.2,
         max_tokens: int = 4096,
+        openrouter_provider: str | None = None,
     ) -> None:
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
+        # OpenRouter-specific routing: pin to a single upstream provider and
+        # disable fallbacks so requests only ever hit it. Merged into the JSON
+        # request body via the OpenAI SDK's ``extra_body``. ``None`` when unset,
+        # which the SDK simply ignores.
+        self._extra_body: dict[str, Any] | None = None
+        if openrouter_provider:
+            self._extra_body = {
+                "provider": {
+                    "order": [openrouter_provider],
+                    "allow_fallbacks": False,
+                }
+            }
 
     @property
     def model(self) -> str:
@@ -77,6 +90,7 @@ class LLMClient:
             temperature=self._temperature if temperature is None else temperature,
             max_tokens=self._max_tokens if max_tokens is None else max_tokens,
             response_format=response_format,
+            extra_body=self._extra_body,
         )
         choice = resp.choices[0]
         return choice.message.content or ""
@@ -103,6 +117,7 @@ class LLMClient:
             tool_choice=tool_choice,
             temperature=self._temperature if temperature is None else temperature,
             max_tokens=self._max_tokens if max_tokens is None else max_tokens,
+            extra_body=self._extra_body,
         )
         msg = resp.choices[0].message
         calls = [
@@ -128,6 +143,7 @@ class LLMClient:
             temperature=self._temperature if temperature is None else temperature,
             max_tokens=self._max_tokens if max_tokens is None else max_tokens,
             stream=True,
+            extra_body=self._extra_body,
         )
         async for chunk in stream:
             try:

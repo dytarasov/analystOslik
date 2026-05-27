@@ -8,8 +8,10 @@ from t2r.domain.models.source import (
     DataSource,
     DataSourceCreate,
     DataSourceUpdate,
+    GlossaryIngestResult,
     TestConnectionResult,
 )
+from t2r.services.glossary_service import GlossaryService
 from t2r.services.source_service import SourceService
 
 router = APIRouter(prefix="/api/admin/sources", tags=["admin-sources"], dependencies=[AdminDep])
@@ -49,6 +51,16 @@ async def update_source(
 @inject
 async def delete_source(source_id: UUID, svc: FromDishka[SourceService]) -> None:
     await svc.delete(source_id)
+
+
+@router.post("/{source_id}/glossary/ingest", response_model=GlossaryIngestResult)
+@inject
+async def ingest_glossary(
+    source_id: UUID, svc: FromDishka[GlossaryService]
+) -> GlossaryIngestResult:
+    """Decompose the source's glossary into the semantic layer (terms, metrics,
+    embedded notes, relations) for on-demand retrieval by the agent."""
+    return await svc.ingest(source_id)
 
 
 @router.post("/{source_id}/test-connection", response_model=TestConnectionResult)

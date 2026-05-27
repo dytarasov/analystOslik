@@ -36,6 +36,8 @@ class DataSourceUpdate(BaseModel):
     password: str | None = None
     secure: bool | None = None
     extra_settings: dict[str, Any] | None = None
+    # Provided (even as "") → glossary is set. Omitted/None → left unchanged.
+    glossary_md: str | None = None
 
 
 class DataSource(BaseModel):
@@ -55,8 +57,20 @@ class DataSource(BaseModel):
     last_profiling_run_id: UUID | None = None
     last_profiled_at: datetime | None = None
     profiling_status: str = "never_profiled"
+    glossary_md: str | None = None
+    glossary_ingested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class GlossaryIngestResult(BaseModel):
+    ok: bool
+    notes: int = 0
+    metrics: int = 0
+    terms: int = 0
+    columns: int = 0
+    relations: int = 0
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TestConnectionResult(BaseModel):

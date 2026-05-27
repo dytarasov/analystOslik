@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
+from neo4j import AsyncDriver
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from t2r.agents.admin_edit.pipeline import build_admin_edit_pipeline
@@ -15,6 +16,8 @@ from t2r.domain.events.types import result_final, step_progress
 from t2r.infra.db.repos.notes_repo_pg import NotesRepoPg
 from t2r.infra.db.repos.profiling_repo_pg import ProfilingRepoPg
 from t2r.infra.db.repos.semantic_repo_pg import SemanticRepoPg
+from t2r.infra.graph.repo import GraphRepoNeo4j
+from t2r.infra.graph.sync import try_resync_source_graph
 from t2r.infra.llm.json_extractor import extract_json
 from t2r.infra.llm.openai_client import LLMClient
 from t2r.infra.llm.prompt_loader import PromptLoader
@@ -108,7 +111,8 @@ class _RegenerateStep(Step):
             domain=new.get("domain"),
             tags=new.get("tags"),
         )
-        await self.session.commit()
+        # Commit is owned by the caller (_run_regenerate) for a single, uniform
+        # transaction boundary across both regenerate flows.
         await run.emit(
             result_final(
                 summary=new.get("title") or "Готово",
@@ -195,14 +199,25 @@ class EditService:
         self,
         *,
         sessionmaker: async_sessionmaker[AsyncSession],
+        neo4j_driver: AsyncDriver,
         llm: LLMClient,
         prompts: PromptLoader,
         registry: RunRegistry,
     ) -> None:
         self.sm = sessionmaker
+        self.driver = neo4j_driver
         self.llm = llm
         self.prompts = prompts
         self.registry = registry
+
+    async def _sync_graph(self, session: AsyncSession, source_id: UUID | None) -> None:
+        """Push the edited semantic layer to Neo4j so the agent's graph tools
+        stay current. Best-effort — PG remains the source of truth."""
+        if not source_id:
+            return
+        await try_resync_source_graph(
+            SemanticRepoPg(session), GraphRepoNeo4j(self.driver), source_id
+        )
 
     async def regenerate_table(
         self, table_id: UUID, *, actor: str, guidance: str | None
@@ -244,6 +259,8 @@ class EditService:
                 pipeline = Pipeline([step])
                 await pipeline.run(agent_run)
                 await session.commit()
+                col = await SemanticRepoPg(session).get_column(column_id)
+                await self._sync_graph(session, col.get("source_id") if col else None)
         except Exception as exc:  # noqa: BLE001
             logger.exception("regenerate column failed")
             await agent_run.finalize(error=str(exc))
@@ -268,6 +285,9 @@ class EditService:
                 )
                 pipeline = Pipeline([step])
                 await pipeline.run(agent_run)
+                await session.commit()
+                t = await SemanticRepoPg(session).get_table(table_id)
+                await self._sync_graph(session, t["source_id"] if t else None)
         except Exception as exc:  # noqa: BLE001
             logger.exception("regenerate failed")
             await agent_run.finalize(error=str(exc))
@@ -299,6 +319,7 @@ class EditService:
                     prompts=self.prompts,
                 )
                 await pipeline.run(agent_run)
+                await self._sync_graph(session, source_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("admin edit failed")
             await agent_run.finalize(error=str(exc))

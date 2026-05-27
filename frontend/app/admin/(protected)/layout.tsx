@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 
 import { LogoutButton } from "@/components/admin/LogoutButton";
 import { DonkeyMark } from "@/components/shared/DonkeyMark";
+import { ThemeToggle } from "@/components/shared/ThemeToggle";
 
 export default function ProtectedAdminLayout({ children }: { children: React.ReactNode }) {
   const cookie = cookies().get("t2r_admin");
@@ -14,14 +15,16 @@ export default function ProtectedAdminLayout({ children }: { children: React.Rea
     <div className="min-h-screen">
       <header className="border-b bg-card">
         <div className="container flex h-14 items-center justify-between">
-          <Link href="/admin" className="flex items-center gap-2 font-semibold tracking-tight">
-            <DonkeyMark size={28} />
-            Аналитический Ослик <span className="text-muted-foreground">· админка</span>
+          <Link href="/admin" className="flex items-center gap-2.5 font-mono text-sm font-semibold tracking-tight">
+            <DonkeyMark size={28} rounded="rounded-md" />
+            Аналитический Ослик
+            <span className="label-mono rounded border border-dashed px-1.5 py-0.5">admin</span>
           </Link>
-          <nav className="flex items-center gap-3 text-sm">
-            <Link href="/admin" className="text-muted-foreground hover:text-foreground">
-              Источники
+          <nav className="flex items-center gap-3 font-mono text-sm">
+            <Link href="/admin" className="text-muted-foreground transition-colors hover:text-foreground">
+              источники
             </Link>
+            <ThemeToggle />
             <LogoutButton />
           </nav>
         </div>

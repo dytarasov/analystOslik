@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { ColumnSelectionGate } from "@/components/admin/ColumnSelectionGate";
 import { QuestionInbox } from "@/components/admin/QuestionInbox";
 import { TaskBoard } from "@/components/admin/TaskBoard";
 import { Button } from "@/components/ui/button";
@@ -71,11 +72,13 @@ export default function ProfilingRunPage() {
   const phase =
     status === "done"
       ? "Готово"
-      : awaiting > 0
-        ? "Ожидают ваших ответов"
-        : (counts.running ?? 0) > 0 || (counts.pending ?? 0) > 0
-          ? "В работе"
-          : "Готовлюсь";
+      : status === "paused"
+        ? "Выберите колонки"
+        : awaiting > 0
+          ? "Ожидают ваших ответов"
+          : (counts.running ?? 0) > 0 || (counts.pending ?? 0) > 0
+            ? "В работе"
+            : "Готовлюсь";
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -141,6 +144,10 @@ export default function ProfilingRunPage() {
           </div>
         </CardContent>
       </Card>
+
+      {status === "paused" && (
+        <ColumnSelectionGate runId={runId} onResume={refresh} />
+      )}
 
       {progress && progress.questions.length > 0 && (
         <QuestionInbox groups={progress.questions} onAnswer={onAnswer} />

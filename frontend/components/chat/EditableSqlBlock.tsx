@@ -1,15 +1,11 @@
 "use client";
 
-import {
-  AlertCircle,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Copy,
-  Loader2,
-  Play,
-} from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { AlertCircle, Check, ChevronRight, Copy, Loader2, Play } from "lucide-react";
+import Prism from "prismjs";
+import "prismjs/components/prism-sql";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Editor from "react-simple-code-editor";
+import { format } from "sql-formatter";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -23,36 +19,54 @@ type RerunResult = {
   exportUrl: string | null;
 };
 
+// Pretty-print the query so a long one-liner becomes a readable, indented block
+// (SELECT columns each on their own line, clauses broken out). Best-effort: if the
+// formatter trips on ClickHouse-specific syntax, we keep the original text.
+function prettySql(raw: string): string {
+  try {
+    return format(raw, { language: "sql", keywordCase: "upper", tabWidth: 2 });
+  } catch {
+    return raw.trim();
+  }
+}
+
 export function EditableSqlBlock({
   sql,
   taskId,
+  sourceName,
   onRerunSuccess,
 }: {
   sql: string;
   taskId: string;
+  sourceName?: string | null;
   onRerunSuccess?: (r: RerunResult) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(sql);
+  const [draft, setDraft] = useState(() => prettySql(sql));
   const [copied, setCopied] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errKind, setErrKind] = useState<string | null>(null);
-  const taRef = useRef<HTMLTextAreaElement>(null);
+  const editorWrapRef = useRef<HTMLDivElement>(null);
+  // prism-sql is imported above, so the grammar is registered at runtime.
+  const highlight = (code: string) => Prism.highlight(code, Prism.languages.sql!, "sql");
 
-  // Keep the editor in sync if a new SQL comes in (e.g. after rerun in another
-  // block referring to the same task).
-  useEffect(() => {
-    setDraft(sql);
-  }, [sql]);
+  // Baseline = the formatted incoming SQL; dirty is measured against it (so just
+  // pretty-printing doesn't read as an unsaved edit).
+  const pretty = useMemo(() => prettySql(sql), [sql]);
 
-  // Auto-grow textarea to fit content (Jupyter-style).
+  // Keep the editor in sync if a new SQL comes in (e.g. after a rerun elsewhere
+  // referring to the same task). The editor auto-grows to its content.
   useEffect(() => {
-    const el = taRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 360)}px`;
-  }, [draft, open]);
+    setDraft(pretty);
+  }, [pretty]);
+
+  const isDirty = draft.trim() !== pretty.trim();
+  const lineCount = useMemo(() => draft.split("\n").length, [draft]);
+  const firstLine = useMemo(
+    () => (pretty.split("\n").find((l) => l.trim()) || pretty).trim(),
+    [pretty],
+  );
 
   async function onCopy() {
     try {
@@ -78,7 +92,7 @@ export function EditableSqlBlock({
           rowcount: res.rowcount,
           exportUrl: res.export_url,
         });
-        setDraft(res.sql); // normalised by sql_guard (LIMIT/SETTINGS injected)
+        setDraft(prettySql(res.sql)); // normalised by sql_guard (LIMIT/SETTINGS injected)
       } else {
         setError(res.error);
         setErrKind(res.kind);
@@ -90,80 +104,123 @@ export function EditableSqlBlock({
     }
   }
 
-  function onKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      run();
-    }
-  }
-
-  const isDirty = draft.trim() !== sql.trim();
+  // ⌘/Ctrl+Enter to run. We attach a NATIVE keydown listener on the textarea
+  // (not React's synthetic onKeyDown): it fires in the element's target phase, so
+  // it works even if something up the tree swallows the synthetic event, and it
+  // sidesteps any synthetic-event delegation quirks. runRef keeps it calling the
+  // latest run() without re-binding on every keystroke.
+  const runRef = useRef(run);
+  runRef.current = run;
+  useEffect(() => {
+    if (!open) return;
+    const el = editorWrapRef.current?.querySelector("textarea");
+    if (!el) return;
+    const handler = (e: KeyboardEvent) => {
+      const isEnter =
+        e.key === "Enter" || e.code === "Enter" || e.code === "NumpadEnter";
+      if ((e.metaKey || e.ctrlKey) && isEnter) {
+        e.preventDefault();
+        void runRef.current();
+      }
+    };
+    el.addEventListener("keydown", handler);
+    return () => el.removeEventListener("keydown", handler);
+  }, [open]);
 
   return (
     <div
       className={cn(
-        "rounded-lg border bg-card",
+        "brackets overflow-hidden rounded-md border bg-card transition-colors",
         error && "border-destructive/40",
       )}
     >
+      {/* Toggle row — stable layout: never changes content/width on open/close,
+          so expanding doesn't shift things around. */}
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between px-3 py-2 text-sm text-muted-foreground hover:bg-muted/30"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/30"
       >
-        <span className="flex items-center gap-2">
-          {open ? (
-            <ChevronDown className="h-4 w-4" />
-          ) : (
-            <ChevronRight className="h-4 w-4" />
+        <ChevronRight
+          className={cn(
+            "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200",
+            open && "rotate-90",
           )}
-          SQL запрос
-          {isDirty && open && (
-            <span className="ml-1 rounded-sm bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">
-              не сохранено
-            </span>
-          )}
-        </span>
-        {open && (
-          <span className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-            <Tooltip label={copied ? "Скопировано" : "Скопировать SQL"}>
-              <Button type="button" size="sm" variant="ghost" onClick={onCopy}>
-                {copied ? <Check className="h-4 w-4 text-success" /> : <Copy className="h-4 w-4" />}
-              </Button>
-            </Tooltip>
-            <Tooltip label="Выполнить запрос (⌘↵)">
-              <Button
-                type="button"
-                size="sm"
-                onClick={run}
-                disabled={running || !draft.trim()}
-                className="transition-transform active:scale-95"
-              >
-                {running ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Play className="h-4 w-4" />
-                )}
-                <span className="ml-1.5 text-xs">Запустить</span>
-              </Button>
-            </Tooltip>
+        />
+        <span className="label-mono shrink-0">sql</span>
+        {open ? (
+          <span className="label-mono ml-1 shrink-0 text-muted-foreground/70">
+            {lineCount} стр.
+          </span>
+        ) : (
+          <code
+            className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+            dangerouslySetInnerHTML={{ __html: highlight(firstLine) }}
+          />
+        )}
+        {isDirty && (
+          <span className="ml-auto shrink-0 rounded-sm bg-warning/15 px-1.5 py-0.5 font-mono text-[10px] text-warning">
+            не сохранено
           </span>
         )}
       </button>
 
       {open && (
         <div className="animate-fade-in-down border-t">
-          <textarea
-            ref={taRef}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onKey}
-            spellCheck={false}
-            className="block w-full resize-none bg-muted/20 px-3 py-3 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            style={{ minHeight: 80 }}
-          />
-          <div className="border-t bg-muted/10 px-3 py-1.5 text-[10px] text-muted-foreground">
-            ⌘+Enter (Ctrl+Enter) — выполнить · правки сохраняются после успешного запуска
+          {/* Toolbar lives in the body, not the header, so toggling never
+              reflows the toggle row. */}
+          <div className="flex items-center justify-between gap-2 border-b bg-muted/40 px-3 py-1.5">
+            <span className="label-mono truncate text-muted-foreground/80">
+              {sourceName || "источник"}
+            </span>
+            <div className="flex items-center gap-1">
+              <Tooltip label={copied ? "Скопировано" : "Скопировать SQL"}>
+                <Button type="button" size="sm" variant="ghost" onClick={onCopy} className="h-7 px-2">
+                  {copied ? (
+                    <Check className="h-3.5 w-3.5 text-success" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </Tooltip>
+              <Button
+                type="button"
+                size="sm"
+                onClick={run}
+                disabled={running || !draft.trim()}
+                className="h-7 gap-1.5 px-2.5 font-mono transition-transform active:scale-95"
+              >
+                {running ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Play className="h-3.5 w-3.5" />
+                )}
+                <span className="text-xs">Запустить</span>
+              </Button>
+            </div>
+          </div>
+
+          {/* The code lives in its own framed, lighter panel (rounded border +
+              card surface on a faint gutter) so it reads as a proper editor. */}
+          <div className="bg-muted/20 p-2.5">
+            <div
+              ref={editorWrapRef}
+              className="scroll-thin max-h-[460px] overflow-auto rounded-lg border bg-card shadow-sm"
+            >
+              <Editor
+                value={draft}
+                onValueChange={setDraft}
+                highlight={highlight}
+                padding={16}
+                textareaClassName="caret-foreground focus:outline-none"
+                style={{
+                  fontFamily: "var(--font-mono), ui-monospace, monospace",
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                  minHeight: 96,
+                }}
+              />
+            </div>
           </div>
         </div>
       )}

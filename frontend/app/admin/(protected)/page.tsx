@@ -60,14 +60,15 @@ export default function AdminDashboardPage() {
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Источники данных</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <span className="label-mono">каталог</span>
+          <h1 className="mt-1.5 text-2xl font-semibold tracking-tight">Источники данных</h1>
+          <p className="mt-1 font-sans text-sm text-muted-foreground">
             Подключённые базы ClickHouse и их семантический слой
           </p>
         </div>
         <Link href="/admin/sources/new">
-          <Button className="gap-1.5">
-            <Plus className="h-4 w-4" /> Добавить источник
+          <Button className="gap-1.5 font-mono">
+            <Plus className="h-4 w-4" /> Добавить
           </Button>
         </Link>
       </div>
@@ -112,7 +113,7 @@ export default function AdminDashboardPage() {
             className="group relative block animate-fade-in-up rounded-xl"
             style={{ animationDelay: `${Math.min(i * 50, 300)}ms` }}
           >
-            <Card className="h-full transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
+            <Card className="brackets h-full transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
               <CardContent className="space-y-3 py-5">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -161,8 +162,8 @@ export default function AdminDashboardPage() {
                   status={s.profiling_status}
                   lastProfiledAt={s.last_profiled_at}
                 />
-                <div className="text-xs text-muted-foreground">
-                  Тест: {s.last_test_status || "не выполнялся"}
+                <div className="font-mono text-[11px] text-muted-foreground">
+                  тест: {s.last_test_status || "не выполнялся"}
                   {s.readonly_verified ? " · read-only ✓" : ""}
                 </div>
               </CardContent>

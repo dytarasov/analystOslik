@@ -27,6 +27,11 @@ from t2r.logging import get_logger
 
 logger = get_logger("profiling_service")
 
+# Cap on the human glossary injected into profiling prompts (per describe call),
+# matching the client agent's budget — guards against a huge paste blowing the
+# context window across many per-table/per-group calls.
+GLOSSARY_CHAR_CAP = 40_000
+
 
 class ProfilingService:
     def __init__(
@@ -47,6 +52,28 @@ class ProfilingService:
         self.embeddings = embeddings
         self.prompts = prompts
         self.registry = registry
+        # Strong refs to fire-and-forget resume tasks. asyncio.create_task only
+        # holds a weak reference, so without this the GC may collect a resume
+        # mid-flight. Discarded on completion to avoid unbounded growth.
+        self._bg_tasks: set[asyncio.Task[None]] = set()
+        # One lock per run serialises resume paths (gate continue / answer
+        # continue), so a double-submit can't spawn two concurrent pass-2 drains
+        # on the same run. Safe to hold on the service since it's an APP singleton.
+        self._resume_locks: dict[str, asyncio.Lock] = {}
+
+    def _spawn(self, coro) -> asyncio.Task[None]:
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
+    def _resume_lock(self, run_id_db: UUID) -> asyncio.Lock:
+        key = str(run_id_db)
+        lock = self._resume_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._resume_locks[key] = lock
+        return lock
 
     async def get_active(self, source_id: UUID) -> dict | None:
         """Return the active DB run for a source (or None) + whether the
@@ -279,7 +306,7 @@ class ProfilingService:
 
             whitelist = [tuple(w) for w in (agent_run.context.get("whitelist") or [])]
 
-            # Pass 1 — dry structural harvest + relations.
+            # Pass 1 — dry structural harvest + relations (all columns).
             t0 = time.time()
             await agent_run.emit(step_started("harvest", "Сбор структуры и связей"))
             await run_pass1(
@@ -288,16 +315,21 @@ class ProfilingService:
             )
             await agent_run.emit(step_completed("harvest", int((time.time() - t0) * 1000)))
 
-            # Pass 2 — grouped LLM profiling (may park on questions).
-            t1 = time.time()
-            await agent_run.emit(step_started("describe", "Профилирую колонки"))
-            await run_pass2(
-                Pass2Deps(self.sm, self.llm, self.prompts),
-                run_id=run_id_db, source_id=source_id,
+            # ── Column-selection gate ──────────────────────────────────────
+            # Pause after the dry harvest so the admin can drop columns from the
+            # deep investigation (LLM describe / notes / synthesis only run over
+            # what survives). Resumed via apply_column_selection → _continue_after_gate.
+            # `paused` is an active status (so the slot stays held); restart marks
+            # it abandoned like any other active run.
+            async with self.sm() as s:
+                await ProfilingRepoPg(s).set_status(run_id_db, "paused")
+                await s.commit()
+            await self._sync_status(source_id)
+            await agent_run.emit(
+                step_started("gate", "Сбор завершён — выберите колонки для исследования")
             )
-            await agent_run.emit(step_completed("describe", int((time.time() - t1) * 1000)))
-
-            await self._maybe_finish(source_id, run_id_db, agent_run)
+            logger.info("v2: paused at column-selection gate", run_id=str(run_id_db))
+            return
         except asyncio.CancelledError:
             try:
                 async with self.sm() as s:
@@ -323,22 +355,64 @@ class ProfilingService:
     ) -> None:
         """Either park the run (questions pending) or finalize it (synthesize + done)."""
         async with self.sm() as s:
+            run = await ProfilingRepoPg(s).get_run(run_id_db)
             counts = await ProfilingTaskRepo(s).counts(run_id_db)
+            coverage = await ProfilingTaskRepo(s).coverage(run_id_db)
+        # Idempotency: a second drain (double resume) or a late answer on an
+        # already-terminal run must not re-run the expensive finalize/synthesize.
+        if run and run["status"] in ("done", "failed", "cancelled"):
+            logger.info("v2: maybe_finish on terminal run, skip", run_id=str(run_id_db), status=run["status"])
+            return
         if counts.get("awaiting_input", 0) > 0:
             logger.info("v2: parked on questions", run_id=str(run_id_db), n=counts["awaiting_input"])
             return
+
+        # Honest final status: if some task failed permanently (its dependents
+        # then never run and stay pending) or coverage is incomplete, don't claim
+        # a clean success — finalize as 'failed' with a clear reason, while still
+        # writing notes/graph/synthesis for whatever DID complete.
+        failed = counts.get("failed", 0)
+        pending_left = counts.get("pending", 0) + counts.get("running", 0)
+        incomplete = failed > 0 or pending_left > 0 or not coverage.get("complete", False)
+        final_error: str | None = None
+        if incomplete:
+            final_error = (
+                f"Профилирование завершено частично: failed={failed}, "
+                f"незавершённых задач={pending_left}, колонок без описания="
+                f"{len(coverage.get('missing') or [])}."
+            )
+
+        try:
+            await self._write_notes(source_id)
+        except Exception:
+            logger.exception("v2: notes write failed (non-fatal)", run_id=str(run_id_db))
+
+        # Mirror the final (enabled-only) layer to the graph. Pass 1 upserts a
+        # node for EVERY harvested column, so columns dropped at the gate must be
+        # pruned here — resync does both (upsert enabled + prune the rest).
+        try:
+            await self._resync_graph(source_id)
+        except Exception:
+            logger.exception("v2: graph resync failed (non-fatal)", run_id=str(run_id_db))
 
         try:
             await self._synthesize_source(source_id, run_id_db)
         except Exception:
             logger.exception("v2: synthesize failed (non-fatal)", run_id=str(run_id_db))
         async with self.sm() as s:
-            await ProfilingRepoPg(s).set_status(run_id_db, "done")
+            await ProfilingRepoPg(s).set_status(
+                run_id_db, "failed" if incomplete else "done", error=final_error
+            )
             await s.commit()
         await self._sync_status(source_id)
         if agent_run is not None and not agent_run.is_finished:
-            await agent_run.finalize()
-        logger.info("v2: run finished", run_id=str(run_id_db))
+            await agent_run.finalize(error=final_error)
+        logger.info(
+            "v2: run finished",
+            run_id=str(run_id_db),
+            status="failed" if incomplete else "done",
+            error=final_error,
+        )
 
     async def answer_question(self, task_id: UUID, answers: list[dict]) -> dict:
         """Store the admin's answers on a parked describe task, re-queue it, and
@@ -350,28 +424,206 @@ class ProfilingService:
                 from t2r.errors import NotFoundError
 
                 raise NotFoundError("Задача не найдена")
+            run_id_db = task["run_id"]
+            source_id = task["source_id"]
+            # Don't reopen a finished run: answering a stale question on a
+            # done/failed/cancelled run would re-run the describe + finalize.
+            run = await ProfilingRepoPg(s).get_run(run_id_db)
+            if run and run["status"] in ("done", "failed", "cancelled"):
+                from t2r.errors import ValidationError
+
+                raise ValidationError("Этот запуск уже завершён — ответ не требуется")
             payload = dict(task.get("payload") or {})
             payload["answers"] = answers
             await repo.set_status(task_id, "pending", payload=payload)
             await s.commit()
-            run_id_db = task["run_id"]
-            source_id = task["source_id"]
 
-        asyncio.create_task(self._continue(source_id, run_id_db))
+        self._spawn(self._continue(source_id, run_id_db))
         return {"ok": True, "run_id": str(run_id_db)}
 
     async def _continue(self, source_id: UUID, run_id_db: UUID) -> None:
         from t2r.agents.admin_profiling.pass2 import Pass2Deps, continue_pass2
 
-        agent_run = await self._agent_run_for(run_id_db)
-        try:
-            await continue_pass2(
-                Pass2Deps(self.sm, self.llm, self.prompts),
-                run_id=run_id_db, source_id=source_id,
+        # Serialise resumes of the same run so a double-answer can't drive two
+        # concurrent pass-2 drains + double finalize.
+        async with self._resume_lock(run_id_db):
+            agent_run = await self._agent_run_for(run_id_db)
+            # Wire cancellation: attach the running task so run.cancel() can abort
+            # an in-flight resume, on par with start()/_run_pipeline_v2.
+            if agent_run is not None:
+                agent_run.attach_task(asyncio.current_task())  # type: ignore[arg-type]
+            glossary = await self._load_glossary(source_id)
+            try:
+                await continue_pass2(
+                    Pass2Deps(self.sm, self.llm, self.prompts, glossary),
+                    run_id=run_id_db, source_id=source_id,
+                )
+                await self._maybe_finish(source_id, run_id_db, agent_run)
+            except Exception as exc:  # noqa: BLE001
+                # Don't leave the run wedged in 'running' forever — mark it failed
+                # and resync, mirroring _continue_after_gate.
+                logger.exception("v2: continue failed", run_id=str(run_id_db))
+                try:
+                    async with self.sm() as s:
+                        await ProfilingRepoPg(s).set_status(
+                            run_id_db, "failed", error=str(exc)
+                        )
+                        await s.commit()
+                    await self._sync_status(source_id)
+                except Exception:
+                    logger.exception("v2: continue fail-persist failed", run_id=str(run_id_db))
+                if agent_run is not None and not agent_run.is_finished:
+                    await agent_run.finalize(error=str(exc))
+
+    async def get_column_selection(self, run_id_db: UUID) -> dict:
+        """The dry-harvest snapshot the admin reviews at the gate: every table
+        with its columns + the facts that inform a keep/drop decision."""
+        async with self.sm() as s:
+            run = await ProfilingRepoPg(s).get_run(run_id_db)
+            if not run:
+                from t2r.errors import NotFoundError
+
+                raise NotFoundError("Запуск не найден")
+            source_id = run["source_id"]
+            repo = SemanticRepoPg(s)
+            tables = await repo.list_tables(source_id)
+            out = []
+            for t in tables:
+                cols = await repo.get_columns(t["id"])
+                out.append(
+                    {
+                        "table_id": str(t["id"]),
+                        "qname": f"{t['database']}.{t['table_name']}",
+                        "title": t.get("title"),
+                        "total_rows": t.get("total_rows"),
+                        "columns": [
+                            {
+                                "name": c["name"],
+                                "data_type": c["data_type"],
+                                "semantic_role": c.get("semantic_role"),
+                                "distinct_count": c.get("distinct_count"),
+                                "null_ratio": (
+                                    float(c["null_ratio"])
+                                    if c.get("null_ratio") is not None
+                                    else None
+                                ),
+                                "examples": c.get("examples"),
+                                "enabled": c.get("enabled", True),
+                            }
+                            for c in cols
+                        ],
+                    }
+                )
+        return {"status": run["status"], "tables": out}
+
+    async def apply_column_selection(
+        self, run_id_db: UUID, disabled: list[dict]
+    ) -> dict:
+        """Record the columns to exclude (per table) and resume the run into
+        pass 2 over what remains. Submitting an empty list proceeds with every
+        column kept."""
+        async with self.sm() as s:
+            prepo = ProfilingRepoPg(s)
+            run = await prepo.get_run(run_id_db)
+            if not run:
+                from t2r.errors import NotFoundError
+
+                raise NotFoundError("Запуск не найден")
+            # Atomically claim the gate transition (paused -> running). Only one
+            # caller wins; a double-submit (double click / retried request) gets
+            # None here and is rejected, so we never spawn two pass-2 drains.
+            source_id = await prepo.try_begin_from_paused(run_id_db)
+            if source_id is None:
+                from t2r.errors import ValidationError
+
+                raise ValidationError(
+                    "Этот запуск не ожидает выбора колонок (уже продолжен или завершён)"
+                )
+            repo = SemanticRepoPg(s)
+            total = 0
+            for item in disabled:
+                names = item.get("names") or []
+                if names:
+                    total += await repo.set_columns_enabled(
+                        UUID(str(item["table_id"])), names, False
+                    )
+            await s.commit()
+
+        logger.info(
+            "v2: column selection applied", run_id=str(run_id_db), disabled=total
+        )
+        self._spawn(self._continue_after_gate(source_id, run_id_db))
+        return {"ok": True, "disabled": total, "run_id": str(run_id_db)}
+
+    async def _continue_after_gate(self, source_id: UUID, run_id_db: UUID) -> None:
+        import time
+
+        from t2r.agents.admin_profiling.pass2 import Pass2Deps, run_pass2
+        from t2r.domain.events.types import step_completed, step_started
+
+        async with self._resume_lock(run_id_db):
+            agent_run = await self._agent_run_for(run_id_db)
+            if agent_run is not None:
+                agent_run.attach_task(asyncio.current_task())  # type: ignore[arg-type]
+            glossary = await self._load_glossary(source_id)
+            try:
+                # try_begin_from_paused already flipped to 'running'; keep this for
+                # the legacy non-gate path and as a harmless idempotent re-set.
+                async with self.sm() as s:
+                    await ProfilingRepoPg(s).set_status(run_id_db, "running")
+                    await s.commit()
+                await self._sync_status(source_id)
+
+                t1 = time.time()
+                if agent_run is not None:
+                    await agent_run.emit(step_started("describe", "Профилирую колонки"))
+                await run_pass2(
+                    Pass2Deps(self.sm, self.llm, self.prompts, glossary),
+                    run_id=run_id_db, source_id=source_id,
+                )
+                if agent_run is not None:
+                    await agent_run.emit(
+                        step_completed("describe", int((time.time() - t1) * 1000))
+                    )
+                await self._maybe_finish(source_id, run_id_db, agent_run)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("v2: continue_after_gate failed", run_id=str(run_id_db))
+                try:
+                    async with self.sm() as s:
+                        await ProfilingRepoPg(s).set_status(
+                            run_id_db, "failed", error=str(exc)
+                        )
+                        await s.commit()
+                except Exception:
+                    logger.exception("v2: gate-resume fail persist failed")
+                await self._sync_status(source_id)
+                if agent_run is not None and not agent_run.is_finished:
+                    await agent_run.finalize(error=str(exc))
+
+    async def _load_glossary(self, source_id: UUID) -> str:
+        """The source's human glossary text (capped), fed to profiling prompts as
+        authoritative domain context. Empty string if none set."""
+        from sqlalchemy import text
+
+        async with self.sm() as s:
+            row = (
+                await s.execute(
+                    text("SELECT glossary_md FROM data_sources WHERE id = :id"),
+                    {"id": source_id},
+                )
+            ).first()
+        glossary = ((row[0] if row else None) or "").strip()
+        if len(glossary) > GLOSSARY_CHAR_CAP:
+            glossary = glossary[:GLOSSARY_CHAR_CAP] + "\n…[глоссарий обрезан по лимиту]"
+        return glossary
+
+    async def _resync_graph(self, source_id: UUID) -> None:
+        from t2r.infra.graph.sync import try_resync_source_graph
+
+        async with self.sm() as session:
+            await try_resync_source_graph(
+                SemanticRepoPg(session), GraphRepoNeo4j(self.neo4j), source_id
             )
-            await self._maybe_finish(source_id, run_id_db, agent_run)
-        except Exception:
-            logger.exception("v2: continue failed", run_id=str(run_id_db))
 
     async def _agent_run_for(self, run_id_db: UUID) -> AgentRun | None:
         async with self.sm() as s:
@@ -389,6 +641,79 @@ class ProfilingService:
         except Exception:
             logger.exception("v2: source status sync failed")
 
+    async def reprofile_column(self, column_id: UUID, *, actor: str) -> dict:
+        """Deep-(re)profile a single column: ensure it's enabled, run the LLM
+        describer over its harvested facts, then rebuild the table's RAG notes
+        and resync the graph. Used to fill in a column that was excluded before
+        pass 2 (facts but no description) when it's re-included."""
+        from t2r.agents.admin_profiling.describe import describe_columns
+        from t2r.agents.admin_profiling.note_writer import rebuild_table_notes
+        from t2r.infra.graph.sync import try_resync_source_graph
+
+        async with self.sm() as session:
+            semantic = SemanticRepoPg(session)
+            col = await semantic.get_column(column_id)
+            if not col:
+                from t2r.errors import NotFoundError
+
+                raise NotFoundError("Колонка не найдена")
+            source_id = col["source_id"]
+            table_id = col["table_id"]
+            # A locked column is protected from re-profiling (apply_column_description
+            # filters on locked=false), so calling the LLM would burn tokens and
+            # update nothing. Bail out clearly instead of pretending it ran.
+            if col.get("locked"):
+                return {
+                    "column_id": str(column_id),
+                    "described": 0,
+                    "skipped": "locked",
+                }
+            if not col.get("enabled", True):
+                await semantic.set_column_enabled(column_id, True)
+            described = await describe_columns(
+                llm=self.llm,
+                prompts=self.prompts,
+                semantic=semantic,
+                table_id=table_id,
+                names=[col["name"]],
+            )
+            # Rebuild this table's notes from the (now-described) enabled columns.
+            full = next(
+                (t for t in await semantic.list_tables(source_id) if t["id"] == table_id),
+                None,
+            )
+            if full:
+                cols = await semantic.get_columns(table_id, only_enabled=True)
+                await rebuild_table_notes(
+                    notes_repo=NotesRepoPg(session),
+                    embeddings=self.embeddings,
+                    source_id=source_id,
+                    table=full,
+                    columns=cols,
+                )
+            await session.commit()
+            try:
+                await try_resync_source_graph(
+                    semantic, GraphRepoNeo4j(self.neo4j), source_id
+                )
+            except Exception:
+                logger.exception("reprofile_column: graph resync failed")
+            return {"column_id": str(column_id), "described": described}
+
+    async def _write_notes(self, source_id: UUID) -> None:
+        """Build the per-table / per-column RAG substrate (md_notes + embeddings)
+        from the persisted semantic layer, over enabled columns only."""
+        from t2r.agents.admin_profiling.note_writer import write_source_notes
+
+        async with self.sm() as session:
+            await write_source_notes(
+                semantic_repo=SemanticRepoPg(session),
+                notes_repo=NotesRepoPg(session),
+                embeddings=self.embeddings,
+                source_id=source_id,
+            )
+            await session.commit()
+
     async def _synthesize_source(self, source_id: UUID, run_id_db: UUID) -> None:
         """Source-level glossary + metrics + overview note (analyst layer)."""
         from t2r.infra.llm.json_extractor import extract_json
@@ -402,7 +727,8 @@ class ProfilingService:
             id_to_qname = {str(t["id"]): f"{t['database']}.{t['table_name']}" for t in tables}
             table_blocks = []
             for t in tables:
-                cols = await semantic.get_columns(t["id"])
+                # Disabled columns must not leak into the source overview note.
+                cols = await semantic.get_columns(t["id"], only_enabled=True)
                 key_cols = [
                     {"name": c["name"], "role": c.get("semantic_role"),
                      "key": bool(c.get("is_in_primary_key") or c.get("is_in_sorting_key"))}
@@ -415,7 +741,7 @@ class ProfilingService:
                     "domain": t.get("domain"), "grain": t.get("grain"),
                     "total_rows": t.get("total_rows"), "columns": key_cols,
                 })
-            relations = await semantic.get_relations(source_id)
+            relations = await semantic.get_relations(source_id, only_enabled=True)
             edges = [
                 {"from": id_to_qname.get(str(r["from_table_id"]), "?"),
                  "to": id_to_qname.get(str(r["to_table_id"]), "?"),
@@ -423,7 +749,10 @@ class ProfilingService:
                  "confidence": float(r["confidence"]) if r.get("confidence") is not None else None}
                 for r in relations
             ]
-            rendered = self.prompts.render("source_synthesizer", tables=table_blocks, edges=edges)
+            glossary = await self._load_glossary(source_id)
+            rendered = self.prompts.render(
+                "source_synthesizer", tables=table_blocks, edges=edges, glossary=glossary
+            )
             out = await self.llm.complete([{"role": "user", "content": rendered}], temperature=0.3)
             try:
                 obj = extract_json(out) or {}

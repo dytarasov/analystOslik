@@ -33,6 +33,32 @@ MERGE (a)-[r:REFERENCES_INFERRED]->(b)
 SET r.kind = $kind, r.confidence = $confidence, r.reasoning = $reasoning
 """
 
+DELETE_SOURCE = """
+MATCH (t:Table { source_id: $source_id })
+OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c:Column)
+DETACH DELETE t, c
+"""
+
+PRUNE_SOURCE_TABLES = """
+MATCH (t:Table { source_id: $source_id })
+WHERE NOT t.id IN $keep
+OPTIONAL MATCH (t)-[:HAS_COLUMN]->(c:Column)
+DETACH DELETE t, c
+"""
+
+# Drop column nodes of one table whose id is no longer in the enabled set
+# (disabled or removed columns). DETACH also removes their REFERENCES edges.
+PRUNE_TABLE_COLUMNS = """
+MATCH (t:Table { id: $table_id })-[:HAS_COLUMN]->(c:Column)
+WHERE NOT c.id IN $keep
+DETACH DELETE c
+"""
+
+DELETE_COLUMN = """
+MATCH (c:Column { id: $id })
+DETACH DELETE c
+"""
+
 NEIGHBORS = """
 MATCH (t:Table { id: $table_id })-[:HAS_COLUMN]->(:Column)
   -[:REFERENCES|REFERENCES_INFERRED*1..2]-(:Column)

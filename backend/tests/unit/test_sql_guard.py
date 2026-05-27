@@ -4,6 +4,90 @@ import pytest
 
 from t2r.infra.security.sql_guard import SqlGuardError, validate_and_rewrite
 
+# Column-level guard fixtures: `secret` is excluded in db.orders.
+_WL = {"db.orders", "db.users"}
+_ENABLED = {"db.orders": ["id", "user_id", "amount"]}
+_DISABLED = {"db.orders": {"secret"}}
+
+
+def _guard(sql: str):
+    return validate_and_rewrite(
+        sql,
+        whitelist_qnames=_WL,
+        enabled_columns=_ENABLED,
+        disabled_columns=_DISABLED,
+    )
+
+
+def test_disabled_column_qualified_is_rejected():
+    with pytest.raises(SqlGuardError):
+        _guard("SELECT o.secret FROM db.orders o")
+
+
+def test_disabled_column_unqualified_single_table_is_rejected():
+    with pytest.raises(SqlGuardError):
+        _guard("SELECT secret FROM db.orders")
+
+
+def test_disabled_column_db_qualified_is_rejected():
+    with pytest.raises(SqlGuardError):
+        _guard("SELECT orders.secret FROM db.orders")
+
+
+def test_disabled_column_in_where_is_rejected():
+    with pytest.raises(SqlGuardError):
+        _guard("SELECT id FROM db.orders WHERE secret = 1")
+
+
+def test_disabled_column_via_alias_in_join_is_rejected():
+    with pytest.raises(SqlGuardError):
+        _guard(
+            "SELECT o.secret, u.id FROM db.orders o JOIN db.users u ON o.user_id = u.id"
+        )
+
+
+def test_enabled_column_passes():
+    res = _guard("SELECT o.amount FROM db.orders o")
+    assert "amount" in res.rewritten
+
+
+def test_bare_star_expands_to_enabled_columns():
+    res = _guard("SELECT * FROM db.orders")
+    # Expanded to the enabled set; the disabled column never appears.
+    assert "id" in res.rewritten and "amount" in res.rewritten
+    assert "secret" not in res.rewritten
+    assert "*" not in res.rewritten
+
+
+def test_qualified_star_expands_with_alias():
+    res = _guard("SELECT o.* FROM db.orders o")
+    assert "o.id" in res.rewritten and "o.amount" in res.rewritten
+    assert "secret" not in res.rewritten
+
+
+def test_star_left_alone_when_no_disabled_columns():
+    # db.users has no disabled columns → `*` is preserved.
+    res = _guard("SELECT * FROM db.users")
+    assert "*" in res.rewritten
+
+
+def test_multi_table_bare_star_with_disabled_is_rejected():
+    with pytest.raises(SqlGuardError):
+        _guard(
+            "SELECT * FROM db.orders o JOIN db.users u ON o.user_id = u.id"
+        )
+
+
+def test_count_star_is_not_treated_as_projection_star():
+    res = _guard("SELECT count(*) FROM db.orders")
+    assert res.has_aggregate is True
+
+
+def test_no_column_maps_means_no_column_enforcement():
+    # Without a disabled map the guard does no column work (back-compat path).
+    res = validate_and_rewrite("SELECT secret FROM db.orders", whitelist_qnames=_WL)
+    assert "secret" in res.rewritten
+
 
 def test_select_passes_and_gets_limit_and_settings():
     res = validate_and_rewrite(

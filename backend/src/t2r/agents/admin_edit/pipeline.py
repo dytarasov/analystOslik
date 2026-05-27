@@ -132,6 +132,7 @@ class _AdminEditStep(Step):
             description=updates.get("description"),
             domain=updates.get("domain"),
             tags=updates.get("tags"),
+            lock=True,
         )
         await self._audit("sem_table", table_id, reason, prev, action)
         return {"action": "update_table", "table_id": str(table_id)}
@@ -141,7 +142,7 @@ class _AdminEditStep(Step):
         if not table_id:
             return None
         await self.semantic_repo.update_table(
-            table_id, user_notes=action.get("user_notes")
+            table_id, user_notes=action.get("user_notes"), lock=True
         )
         await self._audit("sem_table", table_id, reason, None, action)
         return {"action": "set_user_notes", "table_id": str(table_id)}
@@ -164,6 +165,7 @@ class _AdminEditStep(Step):
             to_table_id=to_table_id,
             to_column_id=to_col_id,
             kind=action.get("kind", "conceptual"),
+            origin="manual",
             confidence=float(action.get("confidence", 0.7)),
             reasoning=action.get("reasoning"),
         )

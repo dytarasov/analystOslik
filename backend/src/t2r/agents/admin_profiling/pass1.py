@@ -327,6 +327,7 @@ async def build_relations_for_source(
                         to_table_id=UUID(cand["to_table_id"]),
                         to_column_id=to_col_id,
                         kind="inferred",
+                        origin="profiling",
                         confidence=round(float(ratio), 3),
                         reasoning=(
                             f"Совпадение ключей `{cand['from_col']}`↔`{cand['to_col']}`: "

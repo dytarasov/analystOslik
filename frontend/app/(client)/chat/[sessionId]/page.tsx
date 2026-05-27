@@ -8,7 +8,32 @@ import {
   type ActiveTask,
   type RestoredMessage,
 } from "@/components/chat/ChatRunner";
+import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
+
+function ChatSkeleton() {
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex h-[57px] shrink-0 items-center justify-end border-b px-6">
+        <Skeleton className="h-8 w-40 rounded-lg" />
+      </div>
+      <div className="flex-1 px-4 py-6">
+        <div className="mx-auto max-w-3xl space-y-5">
+          <div className="flex justify-end">
+            <Skeleton className="h-10 w-2/5 rounded-2xl" />
+          </div>
+          <div className="flex gap-2">
+            <Skeleton className="h-7 w-7 shrink-0 rounded-full" />
+            <Skeleton className="h-24 w-3/4 rounded-2xl" />
+          </div>
+          <div className="flex justify-end">
+            <Skeleton className="h-10 w-1/3 rounded-2xl" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function SessionPage() {
   const params = useParams<{ sessionId: string }>();
@@ -47,7 +72,7 @@ export default function SessionPage() {
   }, [params.sessionId]);
 
   if (messages === null) {
-    return <div className="p-6 text-sm text-muted-foreground">Загрузка…</div>;
+    return <ChatSkeleton />;
   }
   return (
     <ChatRunner

@@ -102,15 +102,6 @@ export default function TableEditorPage() {
     }
   }
 
-  async function onConfirm() {
-    try {
-      const updated = await api.tables.confirm(params.tableId);
-      applyTable(updated);
-      toast.success("Подтверждено");
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
-    }
-  }
 
   async function onRegenerate() {
     try {
@@ -119,6 +110,23 @@ export default function TableEditorPage() {
         userNotes || null,
       );
       task.start(`${API_URL}/api/admin/edit/agent-runs/${agent_run_id}/events`);
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
+    }
+  }
+
+  async function onRestoreRevision(revision: number) {
+    if (
+      !confirm(
+        `Восстановить ревизию #${revision}? Текущее состояние сохранится как новая ревизия.`,
+      )
+    )
+      return;
+    try {
+      const updated = await api.restoreTableRevision(params.tableId, revision);
+      applyTable(updated);
+      await loadRevisions();
+      toast.success(`Восстановлена ревизия #${revision}`);
     } catch (err) {
       toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
     }
@@ -153,10 +161,7 @@ export default function TableEditorPage() {
             {table.title || `${table.database}.${table.table_name}`}
           </h1>
           <p className="text-sm text-muted-foreground">
-            <span className="font-mono">{table.database}.{table.table_name}</span> · статус:{" "}
-            <span className={table.confirmation_status === "confirmed" ? "text-success" : ""}>
-              {table.confirmation_status}
-            </span>
+            <span className="font-mono">{table.database}.{table.table_name}</span>
           </p>
         </div>
         <div className="flex gap-2">
@@ -169,11 +174,6 @@ export default function TableEditorPage() {
             >
               <RotateCw className={"h-4 w-4" + (regenerating ? " animate-spin" : "")} />
               Перегенерировать
-            </Button>
-          </Tooltip>
-          <Tooltip label="Пометить как проверенное — агент приоритетно опирается на подтверждённые таблицы">
-            <Button onClick={onConfirm} variant="outline">
-              Подтвердить
             </Button>
           </Tooltip>
           <Button onClick={onSave} disabled={saving}>
@@ -244,11 +244,18 @@ export default function TableEditorPage() {
 
           <section>
             <h2 className="mb-3 text-lg font-medium">
-              Колонки ({table.columns.length})
+              Колонки ({table.columns.length}
+              {(() => {
+                const off = table.columns.filter((c) => c.enabled === false).length;
+                return off ? `, исключено ${off}` : "";
+              })()}
+              )
             </h2>
             <p className="mb-3 text-xs text-muted-foreground">
-              Клик на описание — редактировать. Селект справа — поменять роль.
-              Кнопки справа: перегенерировать описание колонки и подтвердить.
+              Клик на описание — редактировать. Селект — роль. Иконка{" "}
+              <span className="font-mono">глаза</span> — исключить колонку из
+              исследования: её перестают видеть агент, RAG, граф и SQL-guard
+              (факты сохраняются, можно вернуть).
             </p>
             <div className="space-y-2">
               {table.columns.map((c) => (
@@ -264,7 +271,7 @@ export default function TableEditorPage() {
       )}
 
       {tab === "history" && (
-        <RevisionsList revisions={revisions} />
+        <RevisionsList revisions={revisions} onRestore={onRestoreRevision} />
       )}
     </div>
   );
@@ -295,7 +302,13 @@ function TabButton({
   );
 }
 
-function RevisionsList({ revisions }: { revisions: Revision[] }) {
+function RevisionsList({
+  revisions,
+  onRestore,
+}: {
+  revisions: Revision[];
+  onRestore: (revision: number) => void;
+}) {
   if (revisions.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -307,7 +320,7 @@ function RevisionsList({ revisions }: { revisions: Revision[] }) {
     <div className="space-y-2">
       {revisions.map((r) => (
         <Card key={r.id}>
-          <CardHeader className="pb-2">
+          <CardHeader className="flex flex-row items-start justify-between gap-2 pb-2">
             <CardTitle className="text-sm">
               Ревизия #{r.revision}{" "}
               <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -316,14 +329,18 @@ function RevisionsList({ revisions }: { revisions: Revision[] }) {
                 {r.reason && ` · ${r.reason}`}
               </span>
             </CardTitle>
+            <Tooltip label="Откатить таблицу к этому состоянию (текущее сохранится как новая ревизия)">
+              <Button size="sm" variant="outline" onClick={() => onRestore(r.revision)}>
+                Восстановить
+              </Button>
+            </Tooltip>
           </CardHeader>
           <CardContent>
             <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
               {JSON.stringify(r.payload, null, 2)}
             </pre>
             <p className="mt-1 text-xs text-muted-foreground">
-              Снимок состояния ДО изменения. Чтобы откатить — скопируйте нужные
-              поля в форму описания и сохраните.
+              Снимок состояния ДО изменения.
             </p>
           </CardContent>
         </Card>

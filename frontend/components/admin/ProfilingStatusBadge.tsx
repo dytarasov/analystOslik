@@ -48,22 +48,20 @@ export function ProfilingStatusBadge({ status, lastProfiledAt }: Props) {
   return (
     <span
       className={
-        "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium " +
+        "inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 font-mono text-[11px] " +
         meta.className
       }
       title={lastProfiledAt ? `Последний успех: ${formatRelative(lastProfiledAt)}` : undefined}
     >
       <span
         className={
-          "h-1.5 w-1.5 rounded-full bg-current " +
+          "h-1.5 w-1.5 bg-current " +
           (status === "in_progress" ? "animate-pulse-soft" : "opacity-70")
         }
       />
       {meta.label}
       {status === "profiled" && lastProfiledAt && (
-        <span className="ml-1 font-normal opacity-70">
-          · {formatRelative(lastProfiledAt)}
-        </span>
+        <span className="ml-1 opacity-70">· {formatRelative(lastProfiledAt)}</span>
       )}
     </span>
   );

@@ -34,25 +34,28 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="container flex min-h-screen flex-col items-center justify-center gap-6">
+    <main className="relative flex min-h-screen flex-col items-center justify-center gap-6 px-4">
+      <div className="terminal-grid terminal-grid-fade pointer-events-none absolute inset-0 -z-10" />
       <div className="flex flex-col items-center gap-3">
-        <DonkeyMark size={56} />
+        <DonkeyMark size={56} rounded="rounded-lg" />
         <div className="text-center leading-tight">
-          <div className="text-lg font-semibold tracking-tight">Аналитический Ослик</div>
-          <div className="text-xs text-muted-foreground">спросите данные словами</div>
+          <div className="font-mono text-lg font-semibold tracking-tight">Аналитический Ослик</div>
+          <div className="mt-1.5 font-sans text-xs text-muted-foreground">спросите данные словами</div>
         </div>
       </div>
-      <Card className="w-full max-w-sm">
+      <Card className="brackets w-full max-w-sm">
         <CardHeader>
-          <CardTitle>Вход для администратора</CardTitle>
+          <span className="label-mono">авторизация</span>
+          <CardTitle className="pt-1">Вход для администратора</CardTitle>
           <CardDescription>Введите логин и пароль из .env</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="login">Логин</Label>
+              <Label htmlFor="login" className="label-mono">логин</Label>
               <Input
                 id="login"
+                className="font-mono"
                 value={login}
                 onChange={(e) => setLogin(e.target.value)}
                 autoFocus
@@ -60,17 +63,18 @@ export default function LoginPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Пароль</Label>
+              <Label htmlFor="password" className="label-mono">пароль</Label>
               <Input
                 id="password"
                 type="password"
+                className="font-mono"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
               />
             </div>
-            <Button type="submit" disabled={loading} className="w-full">
-              {loading ? "Вход…" : "Войти"}
+            <Button type="submit" disabled={loading} className="w-full font-mono">
+              {loading ? "Вход…" : "Войти →"}
             </Button>
           </form>
         </CardContent>

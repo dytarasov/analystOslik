@@ -645,6 +645,7 @@ class _ProfileEverythingStep(Step):
             to_table_id=to_table_id,
             to_column_id=to_col_id,
             kind=kind,
+            origin="profiling",
             confidence=confidence,
             reasoning=reasoning,
             cardinality=cardinality,

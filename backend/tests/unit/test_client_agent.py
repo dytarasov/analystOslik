@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -94,7 +94,13 @@ def _make_deps(llm, *, ch_client=None) -> ClientAgentDeps:
     ch_factory = SimpleNamespace(
         for_source=AsyncMock(return_value=ch_client or _fake_ch_client(["x"], [[1]]))
     )
+    # The loop loads the source glossary via a raw `session.execute(...).first()`.
+    # SQLAlchemy's async `execute` is awaited but `Result.first()` is sync — model
+    # that (a bare AsyncMock would make `.first()` return a coroutine).
     session = AsyncMock()
+    _glossary_result = MagicMock()
+    _glossary_result.first = MagicMock(return_value=None)  # no glossary configured
+    session.execute = AsyncMock(return_value=_glossary_result)
     return ClientAgentDeps(
         ch_factory=ch_factory,
         semantic_repo=semantic_repo,
@@ -142,7 +148,8 @@ async def test_loop_explore_run_sql_finish():
     assert run.state == RunState.done
     assert llm.calls == 3
     # task_runs UPDATE persisted with the summary
-    assert deps.session.execute.await_count == 1
+    # Two executes: the glossary lookup + the final task_runs UPDATE.
+    assert deps.session.execute.await_count == 2
     assert deps.session.commit.await_count == 1
     events = await _collect(run)
     finals = [e for e in events if e.kind == "result.final"]

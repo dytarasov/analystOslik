@@ -4,6 +4,7 @@ import type {
   DataSource,
   DataSourceCreate,
   DataSourceUpdate,
+  GlossaryIngestResult,
   TestConnectionResult,
 } from "@/lib/types";
 
@@ -66,6 +67,7 @@ export type SemColumn = {
   total_count: number | null;
   examples: unknown;
   confirmation_status: string;
+  enabled: boolean;
 };
 
 export type SemTable = SemTableRow & {
@@ -138,6 +140,27 @@ export type ProfilingProgress = {
   tasks: ProfilingTask[];
 };
 
+export type ColumnSelectionColumn = {
+  name: string;
+  data_type: string;
+  semantic_role: string | null;
+  distinct_count: number | null;
+  null_ratio: number | null;
+  examples: unknown;
+  enabled: boolean;
+};
+
+export type ColumnSelection = {
+  status: string;
+  tables: Array<{
+    table_id: string;
+    qname: string;
+    title: string | null;
+    total_rows: number | null;
+    columns: ColumnSelectionColumn[];
+  }>;
+};
+
 export const api = {
   auth: {
     login: (login: string, password: string) =>
@@ -167,6 +190,11 @@ export const api = {
       }),
     remove: (id: string) =>
       request<void>(`/api/admin/sources/${id}`, { method: "DELETE" }),
+    ingestGlossary: (id: string) =>
+      request<GlossaryIngestResult>(
+        `/api/admin/sources/${id}/glossary/ingest`,
+        { method: "POST" },
+      ),
     testConnection: (id: string) =>
       request<TestConnectionResult>(
         `/api/admin/sources/${id}/test-connection`,
@@ -254,6 +282,18 @@ export const api = {
         `/api/admin/profiling/tasks/${task_id}/answer`,
         { method: "POST", body: JSON.stringify({ answers }) },
       ),
+    columnSelection: (run_id: string) =>
+      request<ColumnSelection>(
+        `/api/admin/profiling/runs/${run_id}/column-selection`,
+      ),
+    applyColumnSelection: (
+      run_id: string,
+      disabled: { table_id: string; names: string[] }[],
+    ) =>
+      request<{ ok: boolean; disabled: number; run_id: string }>(
+        `/api/admin/profiling/runs/${run_id}/column-selection`,
+        { method: "POST", body: JSON.stringify({ disabled }) },
+      ),
   },
   tables: {
     listForSource: (source_id: string) =>
@@ -274,15 +314,19 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify(payload),
       }),
-    confirm: (table_id: string) =>
-      request<SemTable>(`/api/admin/tables/${table_id}/confirm`, {
-        method: "POST",
-      }),
     regenerate: (table_id: string, guidance?: string | null) =>
       request<{ agent_run_id: string }>(`/api/admin/tables/${table_id}/regenerate`, {
         method: "POST",
         body: JSON.stringify({ guidance }),
       }),
+    toggleColumns: (table_id: string, names: string[], enabled: boolean) =>
+      request<{ updated: number }>(
+        `/api/admin/tables/${table_id}/columns/toggle`,
+        {
+          method: "POST",
+          body: JSON.stringify({ names, enabled }),
+        },
+      ),
   },
   adminEdit: {
     submit: (source_id: string, prompt: string) =>
@@ -303,6 +347,7 @@ export const api = {
         description?: string | null;
         semantic_role?: string | null;
         user_notes?: string | null;
+        enabled?: boolean | null;
         reason?: string | null;
       },
     ) =>
@@ -310,10 +355,11 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify(payload),
       }),
-    confirm: (column_id: string) =>
-      request<SemColumn>(`/api/admin/columns/${column_id}/confirm`, {
-        method: "POST",
-      }),
+    reprofile: (column_id: string) =>
+      request<{ column_id: string; described: number }>(
+        `/api/admin/columns/${column_id}/reprofile`,
+        { method: "POST" },
+      ),
     regenerate: (column_id: string, guidance?: string | null) =>
       request<{ agent_run_id: string }>(
         `/api/admin/columns/${column_id}/regenerate`,
@@ -354,6 +400,27 @@ export const api = {
         created_at: string;
       }>
     >(`/api/admin/tables/${table_id}/revisions`),
+  restoreTableRevision: (table_id: string, revision: number) =>
+    request<SemTable>(
+      `/api/admin/tables/${table_id}/revisions/${revision}/restore`,
+      { method: "POST" },
+    ),
+  columnRevisions: (column_id: string) =>
+    request<
+      Array<{
+        id: string;
+        revision: number;
+        payload: Record<string, unknown>;
+        actor: string | null;
+        reason: string | null;
+        created_at: string;
+      }>
+    >(`/api/admin/columns/${column_id}/revisions`),
+  restoreColumnRevision: (column_id: string, revision: number) =>
+    request<SemColumn>(
+      `/api/admin/columns/${column_id}/revisions/${revision}/restore`,
+      { method: "POST" },
+    ),
   client: {
     listPublicSources: () =>
       request<Array<{ id: string; name: string; database: string; readonly_verified: boolean }>>(

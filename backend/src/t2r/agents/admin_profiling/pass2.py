@@ -35,6 +35,10 @@ class Pass2Deps:
     sessionmaker: async_sessionmaker[AsyncSession]
     llm: LLMClient
     prompts: PromptLoader
+    # Source's human glossary (capped). Fed to the describers as authoritative
+    # domain context so descriptions are right first-pass and the model can
+    # self-answer instead of parking awaiting_input questions.
+    glossary: str = ""
 
 
 # ── pure grouping (unit-tested) ────────────────────────────────────────────
@@ -78,7 +82,9 @@ async def seed_pass2_tasks(deps: Pass2Deps, *, run_id: UUID, source_id: UUID) ->
                 table_name=tbl,
                 payload={"mode": "table"},
             )
-            cols = await semantic.get_columns(tid)
+            # Only enabled columns get described — excluded ones (dropped at the
+            # column-selection gate or later) are skipped entirely.
+            cols = await semantic.get_columns(tid, only_enabled=True)
             for gi, group in enumerate(group_columns(cols)):
                 await repo.create(
                     run_id=run_id,
@@ -113,7 +119,7 @@ async def _describe_table_task(
         table_id = await semantic.find_table(source_id, db, tbl)
         if not table_id:
             return TaskResult("skipped", error="table not harvested")
-        cols = await semantic.get_columns(table_id)
+        cols = await semantic.get_columns(table_id, only_enabled=True)
         meta_rows = {
             f"{r['database']}.{r['table_name']}": r
             for r in await semantic.list_tables(source_id)
@@ -131,8 +137,14 @@ async def _describe_table_task(
             for c in cols
         ]
         rendered = deps.prompts.render(
-            "table_summary", database=db, table=tbl, meta=meta, columns=col_ctx
+            "table_summary", database=db, table=tbl, meta=meta, columns=col_ctx,
+            glossary=deps.glossary,
         )
+        # Curated tables (confirmed / hand-edited / glossary) are locked — a
+        # re-profile must not overwrite their human content.
+        tinfo = await semantic.get_table(table_id)
+        if tinfo and tinfo.get("locked"):
+            return TaskResult("skipped", result={"locked": True})
         out = await deps.llm.complete([{"role": "user", "content": rendered}], temperature=0.2)
         try:
             obj = extract_json(out) or {}
@@ -164,7 +176,7 @@ async def _describe_group_task(
         table_id = await semantic.find_table(source_id, db, tbl)
         if not table_id:
             return TaskResult("skipped", error="table not harvested")
-        all_cols = await semantic.get_columns(table_id)
+        all_cols = await semantic.get_columns(table_id, only_enabled=True)
         by_name = {c["name"]: c for c in all_cols}
         trow = {
             f"{r['database']}.{r['table_name']}": r
@@ -203,6 +215,7 @@ async def _describe_group_task(
             columns=col_ctx,
             peers=peers,
             answers=prior_answers,
+            glossary=deps.glossary,
         )
         out = await deps.llm.complete([{"role": "user", "content": rendered}], temperature=0.2)
         try:

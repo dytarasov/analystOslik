@@ -70,6 +70,35 @@ async def list_table_revisions(
     return await svc.list_table_revisions(table_id)
 
 
+@router.post("/tables/{table_id}/revisions/{revision}/restore")
+@inject
+async def restore_table_revision(
+    table_id: UUID,
+    revision: int,
+    svc: FromDishka[SemanticService],
+    login: str = AdminDep,
+) -> dict:
+    return await svc.restore_table_revision(table_id, revision, login)
+
+
+class ColumnsToggle(BaseModel):
+    names: list[str]
+    enabled: bool
+
+
+@router.post("/tables/{table_id}/columns/toggle")
+@inject
+async def toggle_columns(
+    table_id: UUID,
+    payload: ColumnsToggle,
+    svc: FromDishka[SemanticService],
+    login: str = AdminDep,
+) -> dict:
+    return await svc.set_columns_enabled(
+        table_id, names=payload.names, enabled=payload.enabled, actor=login
+    )
+
+
 class TableAskRequest(BaseModel):
     prompt: str
 

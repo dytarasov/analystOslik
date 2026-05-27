@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, RotateCw } from "lucide-react";
+import { Eye, EyeOff, Loader2, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -44,6 +44,18 @@ export function ColumnEditor({
   const [notes, setNotes] = useState(column.user_notes || "");
   const [notesOpen, setNotesOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [toggling, setToggling] = useState(false);
+  const [reprofiling, setReprofiling] = useState(false);
+  const [histOpen, setHistOpen] = useState(false);
+  const [revs, setRevs] = useState<
+    Array<{
+      id: string;
+      revision: number;
+      payload: Record<string, unknown>;
+      reason: string | null;
+      created_at: string;
+    }>
+  >([]);
   const task = useTask();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -123,13 +135,39 @@ export function ColumnEditor({
     }
   }
 
-  async function onConfirm() {
+  async function onToggleEnabled() {
+    if (toggling) return;
+    const next = !(column.enabled ?? true);
+    setToggling(true);
     try {
-      const updated = await api.columns.confirm(column.id);
-      onUpdate(updated as SemColumn);
-      toast.success("Подтверждено");
+      await api.columns.update(column.id, {
+        enabled: next,
+        reason: next ? "включение колонки" : "отключение колонки",
+      });
+      const fresh = await api.columns.get(column.id);
+      onUpdate(fresh as SemColumn);
+      toast.success(
+        next ? "Колонка включена в исследование" : "Колонка исключена из исследования",
+      );
     } catch (err) {
       toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
+    } finally {
+      setToggling(false);
+    }
+  }
+
+  async function onReprofile() {
+    if (reprofiling) return;
+    setReprofiling(true);
+    try {
+      await api.columns.reprofile(column.id);
+      const fresh = await api.columns.get(column.id);
+      onUpdate(fresh as SemColumn);
+      toast.success("Колонка доисследована");
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
+    } finally {
+      setReprofiling(false);
     }
   }
 
@@ -145,52 +183,108 @@ export function ColumnEditor({
     }
   }
 
-  const isConfirmed = column.confirmation_status === "confirmed";
+  async function toggleHist() {
+    const next = !histOpen;
+    setHistOpen(next);
+    if (next) {
+      try {
+        setRevs(await api.columnRevisions(column.id));
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async function restoreRev(revision: number) {
+    try {
+      const updated = await api.restoreColumnRevision(column.id, revision);
+      onUpdate(updated as SemColumn);
+      setRevs(await api.columnRevisions(column.id));
+      toast.success(`Восстановлена ревизия #${revision}`);
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
+    }
+  }
+
   const isRegen = task.state === "running" || task.state === "connecting";
+  const isEnabled = column.enabled ?? true;
 
   return (
-    <div className="rounded-md border bg-card transition hover:border-primary/30">
+    <div
+      className={
+        "rounded-md border bg-card transition hover:border-primary/30" +
+        (isEnabled ? "" : " border-dashed opacity-55")
+      }
+    >
       <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="font-mono text-sm">{column.name}</span>
           <span className="text-xs text-muted-foreground">: {column.data_type}</span>
-          {isConfirmed && (
-            <span className="rounded-sm bg-success/10 px-1.5 py-0.5 text-[10px] text-success">
-              подтверждено
+          {!isEnabled && (
+            <span className="rounded-sm bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              исключена
             </span>
           )}
         </div>
         <div className="flex items-center gap-1">
-          <select
-            value={role}
-            onChange={(e) => saveRole(e.target.value)}
-            className="rounded-md border bg-background px-2 py-1 text-xs"
+          <Tooltip
+            label={
+              isEnabled
+                ? "Исключить колонку из исследования — агент перестанет её видеть (схема, RAG, граф, SQL-guard)"
+                : "Вернуть колонку в исследование"
+            }
           >
-            <option value="">— роль —</option>
-            {ROLES.map((r) => (
-              <option key={r} value={r}>
-                {ROLE_LABEL[r]}
-              </option>
-            ))}
-          </select>
-          <Tooltip label="Перегенерировать описание этой колонки (учтёт ваш комментарий)">
             <button
               type="button"
-              onClick={onRegenerate}
-              disabled={isRegen}
+              onClick={onToggleEnabled}
+              disabled={toggling}
               className="rounded-md border px-2 py-1 text-xs transition-colors hover:bg-muted disabled:opacity-50"
             >
-              <RotateCw className={"h-3.5 w-3.5" + (isRegen ? " animate-spin" : "")} />
+              {toggling ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : isEnabled ? (
+                <Eye className="h-3.5 w-3.5" />
+              ) : (
+                <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />
+              )}
             </button>
           </Tooltip>
-          {!isConfirmed && (
-            <Tooltip label="Подтвердить — агент будет приоритетно опираться на эту колонку при сборке SQL">
+          {isEnabled && (
+            <select
+              value={role}
+              onChange={(e) => saveRole(e.target.value)}
+              className="rounded-md border bg-background px-2 py-1 text-xs"
+            >
+              <option value="">— роль —</option>
+              {ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {ROLE_LABEL[r]}
+                </option>
+              ))}
+            </select>
+          )}
+          {isEnabled && !column.description && (
+            <Tooltip label="Доисследовать: LLM опишет колонку по собранным фактам и обновит заметки/граф">
               <button
                 type="button"
-                onClick={onConfirm}
-                className="rounded-md border px-2 py-1 text-xs text-success transition-colors hover:bg-success/10"
+                onClick={onReprofile}
+                disabled={reprofiling}
+                className="inline-flex items-center gap-1 rounded-md border border-primary/40 px-2 py-1 text-xs text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
               >
-                <Check className="h-3.5 w-3.5" />
+                {reprofiling && <Loader2 className="h-3 w-3 animate-spin" />}
+                доисследовать
+              </button>
+            </Tooltip>
+          )}
+          {isEnabled && (
+            <Tooltip label="Перегенерировать описание этой колонки (учтёт ваш комментарий)">
+              <button
+                type="button"
+                onClick={onRegenerate}
+                disabled={isRegen}
+                className="rounded-md border px-2 py-1 text-xs transition-colors hover:bg-muted disabled:opacity-50"
+              >
+                <RotateCw className={"h-3.5 w-3.5" + (isRegen ? " animate-spin" : "")} />
               </button>
             </Tooltip>
           )}
@@ -252,12 +346,54 @@ export function ColumnEditor({
           {column.distinct_count !== null && <span>distinct: {column.distinct_count}</span>}
           <button
             type="button"
-            onClick={() => setNotesOpen((v) => !v)}
+            onClick={toggleHist}
             className="ml-auto hover:text-foreground"
+          >
+            {histOpen ? "скрыть историю" : "история"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setNotesOpen((v) => !v)}
+            className="hover:text-foreground"
           >
             {notesOpen ? "скрыть комментарий" : column.user_notes ? "комментарий ✎" : "+ комментарий"}
           </button>
         </div>
+
+        {histOpen && (
+          <div className="mt-2 space-y-1.5 border-t pt-2">
+            {revs.length === 0 ? (
+              <p className="text-[10px] text-muted-foreground">История пуста</p>
+            ) : (
+              revs.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex items-start justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-[10px]"
+                >
+                  <div className="min-w-0">
+                    <span className="font-medium">#{r.revision}</span>{" "}
+                    <span className="text-muted-foreground">
+                      {new Date(r.created_at).toLocaleString("ru-RU")}
+                      {r.reason && ` · ${r.reason}`}
+                    </span>
+                    <div className="truncate text-muted-foreground">
+                      {String(r.payload.description ?? "—")}
+                    </div>
+                  </div>
+                  <Tooltip label="Откатить колонку к этому состоянию">
+                    <button
+                      type="button"
+                      onClick={() => restoreRev(r.revision)}
+                      className="shrink-0 rounded border px-1.5 py-0.5 hover:bg-background"
+                    >
+                      ↺
+                    </button>
+                  </Tooltip>
+                </div>
+              ))
+            )}
+          </div>
+        )}
 
         {notesOpen && (
           <div className="mt-2 space-y-2">

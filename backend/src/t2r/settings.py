@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     llm_model: str
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
+    # Pin OpenRouter routing to a single upstream provider (e.g. "Friendli").
+    # Empty/unset → OpenRouter picks the provider as usual. Accepts the bare
+    # LLM_OPENROUTER_PROVIDER as well as the prefixed T2R_ form.
+    llm_openrouter_provider: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "T2R_LLM_OPENROUTER_PROVIDER", "LLM_OPENROUTER_PROVIDER"
+        ),
+    )
 
     emb_base_url: str = Field(
         validation_alias=AliasChoices("T2R_EMB_API_URL", "T2R_EMB_BASE_URL")

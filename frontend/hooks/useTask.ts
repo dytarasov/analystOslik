@@ -40,6 +40,7 @@ export function useTask(opts: UseTaskOptions = {}) {
   const [steps, setSteps] = useState<StepInfo[]>([]);
   const [tokens, setTokens] = useState<string>("");
   const [question, setQuestion] = useState<string | null>(null);
+  const [choices, setChoices] = useState<string[] | null>(null);
   const [result, setResult] = useState<TaskFinalResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -55,6 +56,7 @@ export function useTask(opts: UseTaskOptions = {}) {
     setSteps([]);
     setTokens("");
     setQuestion(null);
+    setChoices(null);
     setResult(null);
     setErrorMsg(null);
   }, []);
@@ -101,10 +103,13 @@ export function useTask(opts: UseTaskOptions = {}) {
       case "llm.token":
         setTokens((t) => t + event.chunk);
         break;
-      case "awaiting_input":
+      case "awaiting_input": {
         setState("awaiting_input");
         setQuestion(event.question);
+        const sc = (event as { schema?: { choices?: string[] } }).schema?.choices;
+        setChoices(Array.isArray(sc) && sc.length > 0 ? sc : null);
         break;
+      }
       case "result.final":
         setResult({
           summary: event.summary,
@@ -135,6 +140,7 @@ export function useTask(opts: UseTaskOptions = {}) {
       setSteps([]);
       setTokens("");
       setQuestion(null);
+      setChoices(null);
       setResult(null);
       setErrorMsg(null);
       streamSSE(url, {
@@ -158,5 +164,5 @@ export function useTask(opts: UseTaskOptions = {}) {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  return { state, steps, tokens, question, result, errorMsg, start, cancel, reset };
+  return { state, steps, tokens, question, choices, result, errorMsg, start, cancel, reset };
 }

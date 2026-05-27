@@ -28,6 +28,9 @@ logger = get_logger("client_agent.loop")
 MAX_ITERATIONS = 16
 MAX_EXEC = 10
 PREVIEW_ROWS = 50
+# Hard ceiling on the human glossary injected into the system prompt. Their
+# glossaries run a few KB; this guards against a runaway paste blowing context.
+GLOSSARY_CHAR_CAP = 40_000
 # How many past user turns of the raw tool-calling thread we replay. Whole turns
 # are kept (so no tool message is ever orphaned from its assistant tool_call),
 # which bounds context growth across a long session.
@@ -82,7 +85,10 @@ class ReactAgentStep(Step):
         if not prior:
             prior = self._history_messages(ctx)
 
-        messages: list[dict[str, Any]] = [self._system_message(ctx, tables, bool(prior))]
+        glossary = await self._load_glossary()
+        messages: list[dict[str, Any]] = [
+            self._system_message(ctx, tables, bool(prior), glossary)
+        ]
         messages.extend(prior)
         persist_from = len(messages)  # everything from here is new this turn
         messages.append({"role": "user", "content": self.prompt})
@@ -106,7 +112,7 @@ class ReactAgentStep(Step):
             messages.append(self._assistant_message(turn.content, turn.tool_calls))
 
             finished = False
-            for tc in turn.tool_calls:
+            for i, tc in enumerate(turn.tool_calls):
                 tool = registry.get(tc.name)
                 step_seq += 1
                 step_id = f"tool{step_seq}"
@@ -118,6 +124,18 @@ class ReactAgentStep(Step):
                     result: Any = {"error": f"Неизвестный инструмент {tc.name!r}"}
                 elif tool.terminal:
                     await run.emit(step_completed(step_id, _ms(started)))
+                    # Every tool_call in the assistant message must get a tool
+                    # reply, or the persisted thread has an orphaned tool_call and
+                    # strict providers 400 on the next turn. Stub-answer the finish
+                    # call and any siblings after it (which we won't execute).
+                    for pending in turn.tool_calls[i:]:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": pending.id,
+                                "content": '{"ok": true}',
+                            }
+                        )
                     await self._finish(
                         run,
                         tctx,
@@ -230,8 +248,26 @@ class ReactAgentStep(Step):
                 out.append({"role": role, "content": content})
         return out
 
+    async def _load_glossary(self) -> str:
+        """The source's human-authored glossary, injected verbatim as an
+        authoritative block. Capped so a huge paste can't blow the context."""
+        row = (
+            await self.deps.session.execute(
+                text("SELECT glossary_md FROM data_sources WHERE id = :id"),
+                {"id": self.source_id},
+            )
+        ).first()
+        glossary = (row[0] if row else None) or ""
+        glossary = glossary.strip()
+        if len(glossary) > GLOSSARY_CHAR_CAP:
+            glossary = (
+                glossary[:GLOSSARY_CHAR_CAP]
+                + "\n…[глоссарий обрезан по лимиту контекста]"
+            )
+        return glossary
+
     def _system_message(
-        self, ctx, tables: list[dict[str, Any]], has_thread: bool
+        self, ctx, tables: list[dict[str, Any]], has_thread: bool, glossary: str = ""
     ) -> dict[str, Any]:
         overview = "\n".join(
             f"- `{t['database']}.{t['table_name']}`"
@@ -255,7 +291,10 @@ class ReactAgentStep(Step):
                 )
 
         system = self.deps.prompts.render(
-            "client_agent", tables_overview=overview, prev_block=prev_block
+            "client_agent",
+            tables_overview=overview,
+            prev_block=prev_block,
+            glossary=glossary,
         )
         return {"role": "system", "content": system}
 

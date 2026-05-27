@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { EditSourceDialog } from "@/components/admin/EditSourceDialog";
+import { GlossaryEditor } from "@/components/admin/GlossaryEditor";
 import { ProfilingStatusBadge } from "@/components/admin/ProfilingStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,19 +46,28 @@ export default function SourceDetailPage() {
   const [search, setSearch] = useState("");
   const [selectionPicker, setSelectionPicker] = useState(false);
   const [pendingSelection, setPendingSelection] = useState<Set<string>>(new Set());
+  // How many tables are currently selected for indexing (null = still loading).
+  // Drives the start flow so the user is guided to select instead of hitting an
+  // error after clicking "Запустить".
+  const [selectedCount, setSelectedCount] = useState<number | null>(null);
+  // True when the picker was opened by clicking "Запустить" with no selection —
+  // saving then immediately starts profiling.
+  const [startAfterSave, setStartAfterSave] = useState(false);
 
   async function refresh() {
     try {
-      const [s, ts, rs, active] = await Promise.all([
+      const [s, ts, rs, active, selection] = await Promise.all([
         api.sources.get(sourceId),
         api.tables.listForSource(sourceId),
         api.profiling.listRuns(sourceId),
         api.profiling.active(sourceId),
+        api.selection.get(sourceId),
       ]);
       setSource(s);
       setTables(ts);
       setRuns(rs);
       setActiveRun(active);
+      setSelectedCount(selection.length);
     } catch (err) {
       toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
     }
@@ -92,7 +102,7 @@ export default function SourceDetailPage() {
     }
   }
 
-  async function savePicker() {
+  async function savePicker(thenStart = false) {
     if (!discovered) return;
     setSaving(true);
     try {
@@ -100,9 +110,17 @@ export default function SourceDetailPage() {
         .filter((t) => pendingSelection.has(`${t.database}.${t.table}`))
         .map((t) => ({ database: t.database, table: t.table }));
       await api.selection.save(sourceId, items);
-      toast.success(`Сохранено ${items.length} таблиц`);
+      setSelectedCount(items.length);
       setSelectionPicker(false);
-      await refresh();
+      setStartAfterSave(false);
+      if (thenStart) {
+        // Selection → profiling in one continuous flow (no dead-end error).
+        toast.success(`Сохранено ${items.length} таблиц — запускаю профилирование`);
+        await performStart();
+      } else {
+        toast.success(`Сохранено ${items.length} таблиц`);
+        await refresh();
+      }
     } catch (err) {
       toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
     } finally {
@@ -162,6 +180,14 @@ export default function SourceDetailPage() {
       router.push(`/admin/sources/${sourceId}/runs/${activeRun.run_id}`);
       return;
     }
+    // No tables selected yet → guide into selection instead of failing. The
+    // picker's "Сохранить и запустить" closes the loop.
+    if (selectedCount === 0) {
+      toast.info("Сначала выберите таблицы — затем сразу запущу профилирование");
+      setStartAfterSave(true);
+      openPicker();
+      return;
+    }
     if (source?.profiling_status === "profiled") {
       setConfirmRerun(true);
       return;
@@ -173,11 +199,13 @@ export default function SourceDetailPage() {
   const isActive = status === "in_progress" && activeRun !== null;
   const startLabel = isActive
     ? "Перейти к запущенному"
-    : status === "profiled"
-      ? "Запустить заново"
-      : status === "failed"
-        ? "Повторить профилирование"
-        : "Запустить профилирование";
+    : selectedCount === 0
+      ? "Выбрать таблицы и запустить"
+      : status === "profiled"
+        ? "Запустить заново"
+        : status === "failed"
+          ? "Повторить профилирование"
+          : "Запустить профилирование";
 
   return (
     <div className="space-y-6">
@@ -202,6 +230,16 @@ export default function SourceDetailPage() {
                   status={status}
                   lastProfiledAt={source.last_profiled_at}
                 />
+                {selectedCount !== null &&
+                  (selectedCount > 0 ? (
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                      выбрано таблиц: <b className="text-foreground">{selectedCount}</b>
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-warning/10 px-2 py-0.5 text-xs text-warning">
+                      таблицы не выбраны
+                    </span>
+                  ))}
                 {isActive && activeRun?.run_id && (
                   <Link
                     href={`/admin/sources/${sourceId}/runs/${activeRun.run_id}`}
@@ -229,14 +267,20 @@ export default function SourceDetailPage() {
               </Link>
               <Tooltip label="Выбрать, какие таблицы индексировать и показывать агенту">
                 <Button
-                  onClick={openPicker}
+                  onClick={() => {
+                    setStartAfterSave(false);
+                    openPicker();
+                  }}
                   variant="outline"
                   disabled={discovering || isActive}
                 >
-                  {discovering ? "…" : "Выбрать таблицы"}
+                  {discovering ? "…" : selectedCount ? "Изменить выбор" : "Выбрать таблицы"}
                 </Button>
               </Tooltip>
-              <Button onClick={onStartClick} disabled={starting}>
+              <Button
+                onClick={onStartClick}
+                disabled={starting || discovering || selectedCount === null}
+              >
                 {starting ? "Запуск…" : startLabel}
               </Button>
             </>
@@ -273,7 +317,9 @@ export default function SourceDetailPage() {
         <Card className="animate-fade-in-up">
           <CardHeader>
             <CardTitle className="text-base">
-              Выберите таблицы для индексации
+              {startAfterSave
+                ? "Шаг 1: выберите таблицы — затем запустим профилирование"
+                : "Выберите таблицы для индексации"}
             </CardTitle>
             <CardDescription>
               Профилирование пройдёт только по выбранным. Этот же набор будет
@@ -356,17 +402,46 @@ export default function SourceDetailPage() {
                 </tbody>
               </table>
             </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setSelectionPicker(false)}>
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setSelectionPicker(false);
+                  setStartAfterSave(false);
+                }}
+              >
                 Отмена
               </Button>
-              <Button onClick={savePicker} disabled={saving}>
-                {saving ? "Сохранение…" : "Сохранить выбор"}
-              </Button>
+              {startAfterSave ? (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={() => savePicker(false)}
+                    disabled={saving || pendingSelection.size === 0}
+                  >
+                    Только сохранить
+                  </Button>
+                  <Button
+                    onClick={() => savePicker(true)}
+                    disabled={saving || pendingSelection.size === 0}
+                  >
+                    {saving ? "…" : `Сохранить и запустить (${pendingSelection.size})`}
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  onClick={() => savePicker(false)}
+                  disabled={saving || pendingSelection.size === 0}
+                >
+                  {saving ? "Сохранение…" : "Сохранить выбор"}
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
       )}
+
+      {source && <GlossaryEditor source={source} onUpdated={setSource} />}
 
       <section>
         <h2 className="mb-3 text-lg font-medium">Запуски профилирования</h2>
@@ -411,10 +486,7 @@ export default function SourceDetailPage() {
                     {t.title || `${t.database}.${t.table_name}`}
                   </CardTitle>
                   <CardDescription>
-                    {t.database}.{t.table_name} · {t.domain || "—"} ·{" "}
-                    <span className={t.confirmation_status === "confirmed" ? "text-success" : "text-muted-foreground"}>
-                      {t.confirmation_status}
-                    </span>
+                    {t.database}.{t.table_name} · {t.domain || "—"}
                   </CardDescription>
                 </CardHeader>
                 <CardContent>

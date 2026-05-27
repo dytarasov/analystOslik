@@ -48,12 +48,12 @@ export function AgentStatusTimeline({
             <Check className="h-3 w-3 text-success" />
           </span>
         )}
-        <span className="font-medium">
+        <span className="font-mono text-xs font-medium tracking-tight">
           {allDone
             ? failedCount > 0
-              ? `Шаги агента · ошибок ${failedCount}`
-              : `Готово · ${steps.length} шаг(ов) · ${(totalMs / 1000).toFixed(1)}с`
-            : `Работаю… ${steps.filter((s) => s.status !== "running").length}/${steps.length}`}
+              ? `ЛОГ · ошибок ${failedCount}`
+              : `ГОТОВО · ${steps.length} шаг(ов) · ${(totalMs / 1000).toFixed(1)}с`
+            : `РАБОТАЮ · ${steps.filter((s) => s.status !== "running").length}/${steps.length}`}
         </span>
         {canToggle && (
           <span className="ml-auto text-muted-foreground transition-transform">
@@ -72,7 +72,9 @@ export function AgentStatusTimeline({
             <li
               key={step.id}
               className="flex animate-fade-in-up items-start gap-2.5 py-1 text-xs"
-              style={{ animationDelay: `${Math.min(i * 40, 240)}ms` }}
+              // While the agent is live, a new step should pop in immediately —
+              // the per-item stagger only plays when reviewing a finished run.
+              style={{ animationDelay: allDone ? `${Math.min(i * 30, 180)}ms` : "0ms" }}
             >
               <span className="relative mt-0.5 flex shrink-0 flex-col items-center">
                 {step.status === "running" && (
@@ -91,7 +93,7 @@ export function AgentStatusTimeline({
               <div className="min-w-0 flex-1 pb-1">
                 <div
                   className={cn(
-                    "font-medium leading-snug",
+                    "font-mono leading-snug",
                     step.status === "failed" && "text-destructive",
                     step.status === "running" && "text-foreground",
                     step.status === "completed" && "text-muted-foreground",

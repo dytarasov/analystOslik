@@ -9,6 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 ACTIVE_STATUSES: tuple[str, ...] = ("pending", "running", "awaiting_input", "paused")
 
+# Statuses we abandon on backend restart. 'paused' is deliberately excluded: a
+# run waiting at the column-selection gate has all pass-1 facts persisted and can
+# be resumed off the DB (apply_column_selection works without the in-memory run),
+# so killing it would force a full re-profile of the source for nothing.
+ABANDON_ON_RESTART: tuple[str, ...] = ("pending", "running", "awaiting_input")
+
 
 class ProfilingRepoPg:
     def __init__(self, session: AsyncSession) -> None:
@@ -52,10 +58,27 @@ class ProfilingRepoPg:
                     " WHERE status = ANY(:statuses)"
                     " RETURNING id, source_id"
                 ),
-                {"err": reason, "statuses": list(ACTIVE_STATUSES)},
+                {"err": reason, "statuses": list(ABANDON_ON_RESTART)},
             )
         ).mappings().all()
         return [r["source_id"] for r in rows]
+
+    async def try_begin_from_paused(self, run_id: UUID) -> UUID | None:
+        """Atomically claim a paused run for resume (paused → running).
+
+        Returns the source_id on success, or None if the run was no longer
+        paused — which is how we reject a double-submit of the column-selection
+        gate (only one caller wins the transition; the rest get None)."""
+        row = (
+            await self.session.execute(
+                text(
+                    "UPDATE profiling_runs SET status = 'running'"
+                    " WHERE id = :id AND status = 'paused' RETURNING source_id"
+                ),
+                {"id": run_id},
+            )
+        ).first()
+        return row[0] if row else None
 
     async def create_run(
         self, source_id: UUID, *, requested_by: str | None, params: dict
