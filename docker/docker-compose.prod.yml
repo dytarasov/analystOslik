@@ -114,6 +114,26 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped
 
+  # Загрузка демо-датасета в ClickHouse (учителя: 3 CSV ~857МБ). Не запускается
+  # по умолчанию — только через профиль:
+  #   docker compose -f docker/docker-compose.prod.yml --profile seed run --rm ch-seeder
+  # CSV положите в docker/seed/data/ на сервере (в git их нет, ~857МБ — scp с локали).
+  ch-seeder:
+    build:
+      context: ./seed
+      dockerfile: Dockerfile
+    profiles: ["seed"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CH_HOST: clickhouse
+      CH_PORT: 8123
+      CH_USER: demo
+      CH_PASS: ${CLICKHOUSE_PASSWORD:-demo}
+    volumes:
+      - ./seed/data:/seed-data:ro
+
 volumes:
   postgres_data:
   neo4j_data:
