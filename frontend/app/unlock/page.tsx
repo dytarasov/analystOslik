@@ -11,39 +11,33 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api, HttpError } from "@/lib/api";
 
-export default function LoginPage() {
+export default function UnlockPage() {
   // useSearchParams требует Suspense, иначе next build падает на пререндере.
   return (
     <Suspense>
-      <LoginForm />
+      <UnlockForm />
     </Suspense>
   );
 }
 
-function LoginForm() {
+function UnlockForm() {
   const params = useSearchParams();
-  // Only allow same-origin relative paths — guards against open-redirect via ?next=.
-  const rawNext = params.get("next") || "/admin";
-  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/admin";
-  const [login, setLogin] = useState("");
-  const [password, setPassword] = useState("");
+  // Только относительные пути — защита от open-redirect через ?next=.
+  const rawNext = params.get("next") || "/";
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/";
+  const [key, setKey] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     try {
-      await api.auth.login(login, password);
-      // Hard navigation, not router.replace(): the login cookie is set by the
-      // cross-origin API response (httpOnly), and a soft App Router navigation
-      // races that cookie / the RSC prefetch cache, so middleware + the server
-      // guard don't see the session yet and bounce back to /login. A full
-      // document load guarantees the fresh cookie is sent.
+      await api.access.unlock(key.trim());
+      // Жёсткая навигация: свежий cookie доступа должен уйти в middleware.
       window.location.replace(next);
     } catch (err) {
-      const msg = err instanceof HttpError ? err.payload.message : "Ошибка входа";
+      const msg = err instanceof HttpError ? err.payload.message : "Не удалось проверить ключ";
       toast.error(msg);
-    } finally {
       setLoading(false);
     }
   }
@@ -60,36 +54,30 @@ function LoginForm() {
       </div>
       <Card className="brackets w-full max-w-sm">
         <CardHeader>
-          <span className="label-mono">авторизация</span>
-          <CardTitle className="pt-1">Вход для администратора</CardTitle>
-          <CardDescription>Введите логин и пароль из .env</CardDescription>
+          <span className="label-mono">доступ</span>
+          <CardTitle className="pt-1">Введите ключ доступа</CardTitle>
+          <CardDescription>
+            Сервис закрыт. Вставьте выданный вам UUID-ключ, чтобы продолжить.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="login" className="label-mono">логин</Label>
+              <Label htmlFor="key" className="label-mono">ключ</Label>
               <Input
-                id="login"
+                id="key"
                 className="font-mono"
-                value={login}
-                onChange={(e) => setLogin(e.target.value)}
+                placeholder="00000000-0000-0000-0000-000000000000"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
                 autoFocus
+                autoComplete="off"
+                spellCheck={false}
                 required
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="password" className="label-mono">пароль</Label>
-              <Input
-                id="password"
-                type="password"
-                className="font-mono"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
-            <Button type="submit" disabled={loading} className="w-full font-mono">
-              {loading ? "Вход…" : "Войти →"}
+            <Button type="submit" disabled={loading || !key.trim()} className="w-full font-mono">
+              {loading ? "Проверяю…" : "Войти →"}
             </Button>
           </form>
         </CardContent>

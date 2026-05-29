@@ -12,6 +12,9 @@ def make_engine(dsn: str) -> AsyncEngine:
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,
+        # Fail fast instead of blocking forever if the pool is exhausted — a
+        # caller gets a clean error rather than a hung request under load.
+        pool_timeout=30,
         future=True,
     )
 

@@ -3,6 +3,7 @@ from uuid import UUID
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Cookie, HTTPException, Response
 
+from t2r.api.cookies import SESSION_MAX_AGE, set_cookie
 from t2r.services.session_service import SessionService
 from t2r.services.task_service import TaskService
 
@@ -15,15 +16,7 @@ def _ensure_cookie(response: Response, current: str | None) -> str:
     if current:
         return current
     new = SessionService.new_cookie()
-    response.set_cookie(
-        COOKIE,
-        new,
-        max_age=60 * 60 * 24 * 30,
-        httponly=True,
-        samesite="lax",
-        secure=False,
-        path="/",
-    )
+    set_cookie(response, COOKIE, new, max_age=SESSION_MAX_AGE)
     return new
 
 

@@ -1,0 +1,20 @@
+# Build context = корень репо. Не тащим секреты и тяжёлые/чужие артефакты в образ.
+**/node_modules
+**/.next
+.git
+.venv
+backend/.venv
+# Секреты окружения (в образ не должны попадать; .example — можно)
+backend/.env
+backend/.env.*
+!backend/.env.example
+!backend/.env.local.example
+frontend/.env.local
+frontend/.env.*.local
+# Прочее
+*.log
+**/__pycache__
+**/*.pyc
+.idea
+docker/seed/data
+oslik.png

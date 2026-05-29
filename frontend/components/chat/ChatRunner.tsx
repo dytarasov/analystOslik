@@ -104,7 +104,9 @@ export function ChatRunner({
         clarifications: [],
       });
       setTurns(restored);
-      task.start(api.client.tasksEventsUrl(activeTask.agent_run_id));
+      task.start(api.client.tasksEventsUrl(activeTask.agent_run_id), {
+        taskId: activeTask.task_id,
+      });
     } else {
       setTurns(restored);
     }
@@ -230,7 +232,7 @@ export function ChatRunner({
             clarifications: [],
           },
         ]);
-        task.start(api.client.tasksEventsUrl(agent_run_id));
+        task.start(api.client.tasksEventsUrl(agent_run_id), { taskId: task_id });
       } catch (err) {
         toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
       }

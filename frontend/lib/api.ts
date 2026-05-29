@@ -36,6 +36,17 @@ async function request<T>(
       body && typeof body === "object" && "message" in body
         ? body
         : { code: "HTTP", message: res.statusText };
+    // Клиентская часть закрыта ключом, а его нет/протух — отправляем на экран
+    // ввода ключа (бэкенд помечает это кодом ACCESS_REQUIRED).
+    if (
+      res.status === 401 &&
+      payload.code === "ACCESS_REQUIRED" &&
+      typeof window !== "undefined" &&
+      !window.location.pathname.startsWith("/unlock")
+    ) {
+      const next = encodeURIComponent(window.location.pathname + window.location.search);
+      window.location.assign(`/unlock?next=${next}`);
+    }
     throw new HttpError(res.status, payload);
   }
   return body as T;
@@ -174,6 +185,15 @@ export const api = {
     logout: () =>
       request<void>("/api/admin/auth/logout", { method: "POST" }),
     me: () => request<{ login: string }>("/api/admin/auth/me"),
+  },
+  access: {
+    status: () =>
+      request<{ required: boolean; unlocked: boolean }>("/api/access/status"),
+    unlock: (key: string) =>
+      request<{ ok: boolean; expires_at: number }>("/api/access/unlock", {
+        method: "POST",
+        body: JSON.stringify({ key }),
+      }),
   },
   sources: {
     list: () => request<DataSource[]>("/api/admin/sources"),

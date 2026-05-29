@@ -15,6 +15,10 @@ export async function streamSSE(url: string, opts: StreamSSEOptions): Promise<vo
   const backoff = opts.reconnectMs ?? DEFAULT_BACKOFF;
   let attempt = 0;
   let lastId: string | null = opts.lastEventId ?? null;
+  // True once a terminal event (done/error) has been dispatched, so we stop
+  // instead of reconnecting. A clean EOF *without* a terminal event means the
+  // connection dropped mid-run → reconnect with Last-Event-ID (backend replays).
+  let sawTerminal = false;
 
   while (true) {
     if (opts.signal?.aborted) return;
@@ -30,7 +34,9 @@ export async function streamSSE(url: string, opts: StreamSSEOptions): Promise<vo
         signal: opts.signal,
       });
       if (!res.ok || !res.body) {
-        throw new Error(`SSE failed: ${res.status}`);
+        const err: Error & { status?: number } = new Error(`SSE failed: ${res.status}`);
+        err.status = res.status;
+        throw err;
       }
       opts.onOpen?.();
       attempt = 0;
@@ -48,6 +54,7 @@ export async function streamSSE(url: string, opts: StreamSSEOptions): Promise<vo
           const ev = { kind: eventName, ...payload } as unknown as AgentEvent;
           opts.onEvent(ev, id);
           if (id) lastId = id;
+          if (ev.kind === "done" || ev.kind === "error") sawTerminal = true;
         } catch (err) {
           opts.onError?.(err);
         }
@@ -77,9 +84,22 @@ export async function streamSSE(url: string, opts: StreamSSEOptions): Promise<vo
           else if (field === "id") id = valueRaw;
         }
       }
-      return;
+      // The read loop ended. If a terminal event arrived (or we were aborted),
+      // we're done; otherwise the stream dropped mid-run — reconnect so the
+      // timeline doesn't get stuck "running" forever after a clean EOF.
+      if (sawTerminal || opts.signal?.aborted) return;
+      const eofDelay = backoff[Math.min(attempt, backoff.length - 1)];
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, eofDelay));
     } catch (err) {
       if (opts.signal?.aborted) return;
+      const status = (err as { status?: number })?.status;
+      // 4xx (e.g. 404 after a restart: the agent run no longer exists) is not
+      // retryable — stop and let the caller fall back to polling task state.
+      if (typeof status === "number" && status >= 400 && status < 500) {
+        opts.onError?.(err);
+        return;
+      }
       opts.onError?.(err);
       const delay = backoff[Math.min(attempt, backoff.length - 1)];
       attempt += 1;

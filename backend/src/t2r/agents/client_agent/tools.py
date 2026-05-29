@@ -340,7 +340,9 @@ async def _ask_user(ctx: ToolContext, args: dict[str, Any]) -> Any:
     question = (args.get("question") or "").strip()
     choices = args.get("choices") or None
     schema = {"choices": choices} if choices else None
-    answer = await ctx.run.await_user_input(question, schema)
+    answer = await ctx.run.await_user_input(
+        question, schema, timeout=ctx.deps.answer_timeout_seconds
+    )
     return {"answer": answer}
 
 
@@ -373,7 +375,9 @@ async def _confirm_plan(ctx: ToolContext, args: dict[str, Any]) -> Any:
         "filters": filters,
         "grain": grain,
     }
-    answer = await ctx.run.await_user_input(question, schema)
+    answer = await ctx.run.await_user_input(
+        question, schema, timeout=ctx.deps.answer_timeout_seconds
+    )
     return {"answer": answer}
 
 

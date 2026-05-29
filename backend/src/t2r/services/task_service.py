@@ -226,6 +226,8 @@ class TaskService:
                     export_dir=self.settings.export_dir,
                     ch_max_execution_time=self.settings.ch_default_max_execution_time,
                     ch_default_limit=self.settings.ch_default_limit,
+                    run_budget_seconds=self.settings.agent_run_budget_seconds,
+                    answer_timeout_seconds=self.settings.client_answer_timeout_seconds,
                 )
 
                 # One ReAct tool-loop handles everything — new query, follow-up,

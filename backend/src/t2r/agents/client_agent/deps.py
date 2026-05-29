@@ -32,6 +32,8 @@ class ClientAgentDeps:
         export_dir: str,
         ch_max_execution_time: int,
         ch_default_limit: int,
+        run_budget_seconds: int = 150,
+        answer_timeout_seconds: int = 300,
     ) -> None:
         self.ch_factory = ch_factory
         self.semantic_repo = semantic_repo
@@ -44,3 +46,7 @@ class ClientAgentDeps:
         self.export_dir = export_dir
         self.ch_max_execution_time = ch_max_execution_time
         self.ch_default_limit = ch_default_limit
+        # Wall-clock ceiling for the whole ReAct run, and how long a confirm_plan/
+        # ask_user prompt may wait for the user before the run self-finishes.
+        self.run_budget_seconds = run_budget_seconds
+        self.answer_timeout_seconds = answer_timeout_seconds

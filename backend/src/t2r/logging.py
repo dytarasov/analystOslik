@@ -25,11 +25,17 @@ def _inject_request_id(_, __, event_dict):
     return event_dict
 
 
-def configure_logging(level: str = "INFO") -> None:
+def configure_logging(level: str = "INFO", *, json_logs: bool = False) -> None:
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
         level=getattr(logging, level.upper(), logging.INFO),
+    )
+    # В проде — машиночитаемый JSON (для агрегаторов/grep), в dev — цветной вывод.
+    renderer = (
+        structlog.processors.JSONRenderer()
+        if json_logs
+        else structlog.dev.ConsoleRenderer(colors=True)
     )
     structlog.configure(
         processors=[
@@ -38,7 +44,8 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
-            structlog.dev.ConsoleRenderer(colors=True),
+            structlog.processors.format_exc_info,
+            renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, level.upper(), logging.INFO)

@@ -2,8 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { api } from "@/lib/api";
 import type { AgentEvent } from "@/lib/events";
 import { streamSSE } from "@/lib/sse";
+
+// Shape of GET /api/tasks/{id} we rely on for the polling fallback (snake_case
+// straight from the backend row).
+type TaskRow = {
+  status?: string;
+  result_summary?: string | null;
+  result_sql?: string | null;
+  result_preview?: unknown;
+  export_path?: string | null;
+  error?: string | null;
+};
 
 export type StepInfo = {
   id: string;
@@ -44,6 +56,9 @@ export function useTask(opts: UseTaskOptions = {}) {
   const [result, setResult] = useState<TaskFinalResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Set once a done/error event arrives, so the post-stream handler knows the
+  // run ended cleanly and skips the polling fallback.
+  const sawTerminalRef = useRef(false);
   const onEventRef = useRef(opts.onEvent);
   onEventRef.current = opts.onEvent;
 
@@ -62,9 +77,6 @@ export function useTask(opts: UseTaskOptions = {}) {
   }, []);
 
   const handleEvent = useCallback((event: AgentEvent) => {
-    // Verbose by design — easy to find in browser devtools when debugging cancel/SSE.
-    // eslint-disable-next-line no-console
-    console.debug("[useTask] event", event.kind, event);
     switch (event.kind) {
       case "step.started":
         setState("running");
@@ -119,10 +131,12 @@ export function useTask(opts: UseTaskOptions = {}) {
         });
         break;
       case "error":
+        sawTerminalRef.current = true;
         setState("error");
         setErrorMsg(event.message);
         break;
       case "done":
+        sawTerminalRef.current = true;
         setState((s) => (s === "error" ? s : "done"));
         break;
       default:
@@ -131,11 +145,57 @@ export function useTask(opts: UseTaskOptions = {}) {
     onEventRef.current?.(event);
   }, []);
 
+  // Fallback when the SSE stream ends without a terminal event (e.g. the agent
+  // run was lost to a backend restart → 404 on reconnect). Pull the persisted
+  // task state from Postgres a few times so a finished run still renders its
+  // answer instead of spinning forever.
+  const pollFinalState = useCallback(
+    async (taskId: string, signal: AbortSignal) => {
+      const delays = [800, 1500, 2500, 4000];
+      for (const delay of delays) {
+        if (signal.aborted) return;
+        try {
+          const t = (await api.client.getTask(taskId)) as TaskRow;
+          if (t?.status === "done") {
+            setErrorMsg(null);
+            setResult({
+              summary: t.result_summary ?? null,
+              sql: t.result_sql ?? null,
+              preview: t.result_preview ?? null,
+              exportUrl: t.export_path ? api.client.exportUrl(taskId) : null,
+            });
+            setState("done");
+            return;
+          }
+          if (t?.status === "failed") {
+            setErrorMsg(t.error ?? "Не удалось сформировать ответ");
+            setState("error");
+            return;
+          }
+          if (t?.status === "cancelled") {
+            setState("cancelled");
+            return;
+          }
+          // still running/awaiting_input — wait and retry
+        } catch {
+          // getTask 404 / network — fall through to retry, then give up below
+        }
+        await new Promise((r) => setTimeout(r, delay));
+      }
+      if (!signal.aborted) {
+        setState("error");
+        setErrorMsg("Соединение потеряно. Обновите страницу.");
+      }
+    },
+    [],
+  );
+
   const start = useCallback(
-    (url: string) => {
+    (url: string, startOpts?: { taskId?: string }) => {
       abortRef.current?.abort();
       const ac = new AbortController();
       abortRef.current = ac;
+      sawTerminalRef.current = false;
       setState("connecting");
       setSteps([]);
       setTokens("");
@@ -146,15 +206,22 @@ export function useTask(opts: UseTaskOptions = {}) {
       streamSSE(url, {
         signal: ac.signal,
         onEvent: handleEvent,
-        onError: (err) => {
-          if (!ac.signal.aborted) {
+        // Transient errors are handled by streamSSE's reconnect; don't flip the
+        // UI to "error" on every blip — the post-stream handler below decides.
+        onError: () => {},
+      })
+        .then(() => {
+          if (ac.signal.aborted || sawTerminalRef.current) return;
+          // Stream ended without done/error: try to recover the final state.
+          if (startOpts?.taskId) void pollFinalState(startOpts.taskId, ac.signal);
+          else {
             setState("error");
-            setErrorMsg(String(err));
+            setErrorMsg("Соединение потеряно. Обновите страницу.");
           }
-        },
-      }).catch(() => {});
+        })
+        .catch(() => {});
     },
-    [handleEvent],
+    [handleEvent, pollFinalState],
   );
 
   const cancel = useCallback(() => {

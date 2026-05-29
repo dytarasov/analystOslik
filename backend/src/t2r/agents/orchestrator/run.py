@@ -14,6 +14,12 @@ from t2r.logging import get_logger
 logger = get_logger("agent_run")
 
 
+class UserInputTimeout(Exception):
+    """Raised by await_user_input when the user does not answer within the
+    allotted time, so the caller can finalize the run instead of parking
+    forever (which would pin a DB connection and block the chat session)."""
+
+
 class RunState(str, Enum):
     pending = "pending"
     running = "running"
@@ -107,7 +113,9 @@ class AgentRun:
         await self.bus.close()
         logger.info("run.cancel: completed", run_id=self.id)
 
-    async def await_user_input(self, question: str, schema: dict | None = None) -> Any:
+    async def await_user_input(
+        self, question: str, schema: dict | None = None, *, timeout: float | None = None
+    ) -> Any:
         from t2r.domain.events.types import awaiting_input
 
         self.state = RunState.awaiting_input
@@ -115,7 +123,13 @@ class AgentRun:
         self._awaiting_future = loop.create_future()
         await self.emit(awaiting_input(question, schema))
         try:
-            answer = await self._awaiting_future
+            if timeout and timeout > 0:
+                answer = await asyncio.wait_for(self._awaiting_future, timeout=timeout)
+            else:
+                answer = await self._awaiting_future
+        except asyncio.TimeoutError as exc:
+            logger.warning("await_user_input: timed out", run_id=self.id, timeout=timeout)
+            raise UserInputTimeout("Истекло время ожидания ответа пользователя") from exc
         finally:
             self.state = RunState.running
             self._awaiting_future = None

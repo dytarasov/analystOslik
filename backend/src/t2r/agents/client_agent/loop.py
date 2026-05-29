@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from t2r.agents.client_agent.deps import ClientAgentDeps
 from t2r.agents.client_agent.tools import StoredResult, ToolContext, build_registry
-from t2r.agents.orchestrator.run import AgentRun
+from t2r.agents.orchestrator.run import AgentRun, UserInputTimeout
 from t2r.agents.orchestrator.step import Step
 from t2r.domain.events.types import (
     result_final,
@@ -42,6 +42,16 @@ THREAD_CHAR_BUDGET = 48_000
 # Per tool-observation cap appended to the live context. Full results are still
 # kept server-side for preview/export; this only bounds what the model re-reads.
 OBS_CHAR_CAP = 12_000
+
+# Shown when the run hits its wall-clock budget or an LLM/tool call times out.
+_BUDGET_SUMMARY = (
+    "Не уложился в отведённое время — показываю последний полученный результат."
+)
+# Shown when the user never answers a confirm_plan / ask_user prompt.
+_ANSWER_TIMEOUT_SUMMARY = (
+    "Не дождался вашего ответа и остановил расчёт. "
+    "Когда будете готовы — задайте вопрос ещё раз."
+)
 
 
 class ReactAgentStep(Step):
@@ -95,12 +105,38 @@ class ReactAgentStep(Step):
 
         exec_count = 0
         step_seq = 0
+        # Wall-clock deadline for the whole run. Time a human spends answering an
+        # ask_user/confirm_plan prompt is added back (see the interactive branch),
+        # so a slow confirmation never eats the compute budget.
+        deadline = time.monotonic() + self.deps.run_budget_seconds
 
         for _ in range(MAX_ITERATIONS):
             if run.cancel_event.is_set():
                 raise asyncio.CancelledError()
 
-            turn = await self.deps.llm.complete_with_tools(messages, tool_schemas)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                await self._finish(
+                    run, tctx, summary=_BUDGET_SUMMARY, result_from=None,
+                    messages=messages, persist_from=persist_from,
+                )
+                return
+
+            # Don't pin a pooled PG connection while waiting on the LLM. The agent
+            # only reads PG before _finish, so rolling back the autobegun read tx
+            # just returns the connection to the pool for the duration of the call.
+            await self.deps.session.rollback()
+            try:
+                turn = await asyncio.wait_for(
+                    self.deps.llm.complete_with_tools(messages, tool_schemas),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                await self._finish(
+                    run, tctx, summary=_BUDGET_SUMMARY, result_from=None,
+                    messages=messages, persist_from=persist_from,
+                )
+                return
 
             if not turn.tool_calls:
                 await self._finish(
@@ -146,19 +182,46 @@ class ReactAgentStep(Step):
                     )
                     finished = True
                     break
-                else:
-                    if tc.name == "run_sql":
-                        exec_count += 1
-                        if exec_count > MAX_EXEC:
-                            result = {
-                                "error": "Превышен лимит запросов. Заверши ответ "
-                                "через finish по уже полученным данным.",
-                                "kind": "budget",
-                            }
-                        else:
-                            result = await self._safe_call(tool, tctx, tc)
-                    else:
+                elif tool.interactive:
+                    # confirm_plan / ask_user block on a human. Release the PG
+                    # connection while parked, and don't bill the wait to the run
+                    # budget. A timeout means the user walked away — finish cleanly
+                    # so the session slot and connection are freed.
+                    await self.deps.session.rollback()
+                    t_wait = time.monotonic()
+                    try:
                         result = await self._safe_call(tool, tctx, tc)
+                    except UserInputTimeout:
+                        await run.emit(step_completed(step_id, _ms(started)))
+                        # Every tool_call in this assistant message still needs a
+                        # tool reply, or the persisted thread is left unbalanced.
+                        for pending in turn.tool_calls[i:]:
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": pending.id,
+                                    "content": '{"timeout": true}',
+                                }
+                            )
+                        await self._finish(
+                            run, tctx, summary=_ANSWER_TIMEOUT_SUMMARY,
+                            result_from=None, messages=messages,
+                            persist_from=persist_from,
+                        )
+                        return
+                    deadline += time.monotonic() - t_wait
+                elif tc.name == "run_sql":
+                    exec_count += 1
+                    if exec_count > MAX_EXEC:
+                        result = {
+                            "error": "Превышен лимит запросов. Заверши ответ "
+                            "через finish по уже полученным данным.",
+                            "kind": "budget",
+                        }
+                    else:
+                        result = await self._bounded_call(tool, tctx, tc, deadline)
+                else:
+                    result = await self._bounded_call(tool, tctx, tc, deadline)
 
                 await run.emit(step_completed(step_id, _ms(started)))
                 messages.append(
@@ -190,11 +253,29 @@ class ReactAgentStep(Step):
     async def _safe_call(self, tool, tctx: ToolContext, tc: ToolCall) -> Any:
         try:
             return await tool.handler(tctx, tc.arguments)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, UserInputTimeout):
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("tool failed", tool=tc.name, error=str(exc))
             return {"error": str(exc)}
+
+    async def _bounded_call(
+        self, tool, tctx: ToolContext, tc: ToolCall, deadline: float
+    ) -> Any:
+        """Run a non-interactive tool, bounded by the remaining run budget. An
+        unreachable ClickHouse has no client-side network timeout, so without
+        this a single hung tool call could freeze the loop past the deadline."""
+        timeout = max(1.0, deadline - time.monotonic())
+        try:
+            return await asyncio.wait_for(
+                self._safe_call(tool, tctx, tc), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("tool timed out", tool=tc.name, timeout=round(timeout, 1))
+            return {
+                "error": "Инструмент превысил отведённое время выполнения.",
+                "kind": "timeout",
+            }
 
     def _assistant_message(
         self, content: str | None, calls: list[ToolCall]

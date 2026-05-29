@@ -1,0 +1,27 @@
+# Прод-сборка фронта: настоящий `next build` + `next start` (без dev-сервера/HMR).
+# NEXT_PUBLIC_* инлайнятся в бандл на этапе build — поэтому передаём их как ARG.
+FROM node:20-alpine AS build
+WORKDIR /app
+
+COPY frontend/package.json frontend/package-lock.json* /app/
+RUN npm ci
+
+COPY frontend/ /app/
+
+# Для single-domain за reverse-proxy: пустой API_URL → относительные пути.
+ARG NEXT_PUBLIC_API_URL=""
+ARG NEXT_PUBLIC_REQUIRE_ACCESS_KEY="1"
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_REQUIRE_ACCESS_KEY=$NEXT_PUBLIC_REQUIRE_ACCESS_KEY
+RUN npm run build
+
+FROM node:20-alpine AS run
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/package.json /app/package-lock.json* /app/
+COPY --from=build /app/node_modules /app/node_modules
+COPY --from=build /app/.next /app/.next
+COPY --from=build /app/public /app/public
+COPY --from=build /app/next.config.js /app/next.config.js
+EXPOSE 3000
+CMD ["npm", "run", "start"]

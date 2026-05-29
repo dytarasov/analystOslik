@@ -10,10 +10,14 @@ from t2r.agents.orchestrator.registry import RunRegistry
 from t2r.api.client.session import COOKIE, _ensure_cookie
 from t2r.api.common.sse import sse_response
 from t2r.errors import NotFoundError
+from t2r.infra.rate_limit.limiter import limiter
+from t2r.logging import get_logger
 from t2r.services.session_service import SessionService
 from t2r.services.task_service import TaskService
+from t2r.settings import get_settings
 
 router = APIRouter(prefix="/api", tags=["client-tasks"])
+logger = get_logger("client-tasks")
 
 
 class StartTaskRequest(BaseModel):
@@ -27,8 +31,10 @@ class RespondRequest(BaseModel):
 
 
 @router.post("/tasks")
+@limiter.limit(lambda: get_settings().client_rate_limit)
 @inject
 async def start_task(
+    request: Request,
     payload: StartTaskRequest,
     response: Response,
     svc: FromDishka[TaskService],
@@ -42,6 +48,13 @@ async def start_task(
         session_id=payload.session_id,
         source_id=payload.source_id,
         prompt=payload.prompt,
+    )
+    logger.info(
+        "task started",
+        task_id=str(task_id),
+        session_id=str(payload.session_id),
+        source_id=str(payload.source_id),
+        prompt_len=len(payload.prompt),
     )
     return {"task_id": str(task_id), "agent_run_id": agent_run_id}
 

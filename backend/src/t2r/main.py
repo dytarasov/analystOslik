@@ -1,3 +1,4 @@
+import time
 from contextlib import asynccontextmanager
 
 from dishka.integrations.fastapi import setup_dishka
@@ -10,17 +11,18 @@ from slowapi.middleware import SlowAPIMiddleware
 from t2r.api.admin.audit import router as admin_audit_router
 from t2r.api.admin.auth import router as admin_auth_router
 from t2r.api.admin.columns import router as admin_columns_router
-from t2r.api.admin.demo_sse import router as admin_demo_sse_router
 from t2r.api.admin.edit import router as admin_edit_router
 from t2r.api.admin.graph import router as admin_graph_router
 from t2r.api.admin.profiling import router as admin_profiling_router
 from t2r.api.admin.selection import router as admin_selection_router
 from t2r.api.admin.sources import router as admin_sources_router
 from t2r.api.admin.tables import router as admin_tables_router
+from t2r.api.client.access import router as client_access_router
 from t2r.api.client.session import router as client_sessions_router
 from t2r.api.client.sources import router as client_sources_router
 from t2r.api.client.tasks import router as client_tasks_router
 from t2r.api.common.health import router as health_router
+from t2r.api.deps import ClientAccessDep
 from t2r.di.container import build_container
 from t2r.errors import DomainError, to_payload
 from t2r.infra.db.migrations import apply_pending
@@ -77,7 +79,7 @@ async def _recover_abandoned_tasks(container) -> None:
                 _text(
                     "UPDATE task_runs SET status = 'failed',"
                     " error = 'abandoned_on_restart', finished_at = now()"
-                    " WHERE status = 'running'"
+                    " WHERE status IN ('running', 'awaiting_input')"
                     " RETURNING id, session_id"
                 )
             )
@@ -104,7 +106,13 @@ async def _recover_abandoned_tasks(container) -> None:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, json_logs=settings.json_logs_effective)
+    logger.info(
+        "app starting",
+        env=settings.env,
+        access_gate=settings.access_required,
+        json_logs=settings.json_logs_effective,
+    )
 
     # Dishka adds a middleware — it MUST be installed before the app starts
     # serving requests. We build the container synchronously here; lifespan
@@ -146,12 +154,43 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Один BaseHTTPMiddleware: request_id + access-log + security-заголовки.
+    # Держим всё в одном слое — лишние обёртки над StreamingResponse рискуют
+    # сломать/задержать SSE-стриминг.
     @app.middleware("http")
-    async def request_id_middleware(request: Request, call_next):
+    async def request_middleware(request: Request, call_next):
         rid = request.headers.get("x-request-id") or set_request_id()
         set_request_id(rid)
-        response = await call_next(request)
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception(
+                "http_request failed",
+                method=request.method,
+                path=request.url.path,
+            )
+            raise
         response.headers["x-request-id"] = rid
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault(
+            "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
+        )
+        if settings.is_prod:
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
+        # Структурный access-лог. Health-проверки не шумим.
+        if request.url.path not in ("/healthz", "/readyz"):
+            logger.info(
+                "http_request",
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
         return response
 
     @app.exception_handler(DomainError)
@@ -166,9 +205,9 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(health_router)
+    # Admin — защищён логином/паролем (AdminDep на роутерах).
     app.include_router(admin_auth_router)
     app.include_router(admin_sources_router)
-    app.include_router(admin_demo_sse_router)
     app.include_router(admin_profiling_router)
     app.include_router(admin_tables_router)
     app.include_router(admin_columns_router)
@@ -176,9 +215,12 @@ def create_app() -> FastAPI:
     app.include_router(admin_audit_router)
     app.include_router(admin_graph_router)
     app.include_router(admin_selection_router)
-    app.include_router(client_sessions_router)
-    app.include_router(client_tasks_router)
-    app.include_router(client_sources_router)
+    # Access-роутер (status/unlock) — НЕ под гейтом, иначе ключ некуда вводить.
+    app.include_router(client_access_router)
+    # Клиентская часть — под UUID-гейтом (если T2R_ACCESS_KEY задан).
+    app.include_router(client_sessions_router, dependencies=[ClientAccessDep])
+    app.include_router(client_tasks_router, dependencies=[ClientAccessDep])
+    app.include_router(client_sources_router, dependencies=[ClientAccessDep])
     return app
 
 

@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI
 
 
@@ -54,8 +55,19 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 4096,
         openrouter_provider: str | None = None,
+        request_timeout: float = 60.0,
+        max_retries: int = 1,
     ) -> None:
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # Explicit timeout + bounded retries: without these the SDK defaults to a
+        # 600s timeout and 2 retries, so a stalled upstream could hang a single
+        # call for minutes and freeze the agent's "running" spinner. Cap connect
+        # separately so an unreachable endpoint fails fast.
+        self._client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=httpx.Timeout(request_timeout, connect=min(10.0, request_timeout)),
+            max_retries=max_retries,
+        )
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens

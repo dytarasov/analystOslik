@@ -69,6 +69,8 @@ class AppProvider(Provider):
             temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
             openrouter_provider=settings.llm_openrouter_provider,
+            request_timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
         )
 
     @provide
@@ -78,6 +80,7 @@ class AppProvider(Provider):
             api_key=settings.emb_api_key,
             model=settings.emb_model,
             dim=settings.emb_dim,
+            request_timeout=settings.emb_request_timeout,
         )
 
     @provide

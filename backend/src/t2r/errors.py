@@ -26,6 +26,14 @@ class UnauthorizedError(DomainError):
     status_code = 401
 
 
+class AccessRequiredError(DomainError):
+    """Клиентская часть закрыта UUID-ключом, а валидного нет. Отдельный код,
+    чтобы фронт отличал «нужен ключ доступа» от обычной 401 и слал на /unlock."""
+
+    code = "ACCESS_REQUIRED"
+    status_code = 401
+
+
 class ValidationError(DomainError):
     code = "VALIDATION"
     status_code = 422
