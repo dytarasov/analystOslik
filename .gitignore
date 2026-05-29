@@ -31,6 +31,8 @@ next-env.d.ts
 .env.*
 !.env.example
 !.env.local.example
+# Self-runbook с секретами прод-деплоя (репо публичный — НЕ коммитить)
+DEPLOY_RUNBOOK.md
 
 # IDE
 .idea/
