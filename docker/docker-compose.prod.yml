@@ -92,8 +92,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.frontend.prod
       args:
-        # Один домен → относительные пути; экран ключа включён.
-        NEXT_PUBLIC_API_URL: ""
+        # Абсолютный same-origin URL домена (а НЕ ""): Next.js не инлайнит пустую
+        # строку, и env.ts откатывался на http://localhost:8000 → CORS/mixed-content.
+        # Тот же домен, что у фронта → запросы остаются same-origin (без CORS).
+        NEXT_PUBLIC_API_URL: "https://analyticaloslik.com"
         NEXT_PUBLIC_REQUIRE_ACCESS_KEY: "1"
     depends_on:
       - backend
