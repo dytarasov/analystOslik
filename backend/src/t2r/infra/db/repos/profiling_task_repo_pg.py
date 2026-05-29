@@ -249,6 +249,25 @@ class ProfilingTaskRepo:
             for c in cols or []:
                 expected.add((h["database"], h["table_name"], str(c)))
 
+        # Columns the admin disabled are intentionally excluded from describe_group,
+        # so they are never "covered". They stay harvested in pass-1 (the catalog
+        # must remain complete for cheap re-enable), so without subtracting them
+        # here they'd surface as "missing" and falsely fail an otherwise-complete
+        # run. Disabling a column is a deliberate decision — don't require a description.
+        disabled_rows = (
+            await self.session.execute(
+                text(
+                    "SELECT t.database, t.table_name, c.name"
+                    " FROM sem_columns c"
+                    " JOIN sem_tables t ON t.id = c.table_id"
+                    " JOIN profiling_runs r ON r.source_id = t.source_id"
+                    " WHERE r.id = :rid AND c.enabled = false"
+                ),
+                {"rid": run_id},
+            )
+        ).all()
+        expected -= {(r[0], r[1], str(r[2])) for r in disabled_rows}
+
         covered_rows = (
             await self.session.execute(
                 text(
