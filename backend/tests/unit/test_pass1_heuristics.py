@@ -47,8 +47,17 @@ def test_detect_pattern():
     assert detect_pattern(["a@b.com", "c@d.io"]) == "email"
     assert detect_pattern(["11111111-1111-1111-1111-111111111111"]) == "uuid"
     assert detect_pattern(["http://x", "https://y"]) == "url"
+    # mixed json shapes fall back to the generic label
     assert detect_pattern(['{"a":1}', "[1,2]"]) == "json"
+    # refined shapes — these are what tell the describer "don't ask, it's a blob"
+    assert detect_pattern(['{"a":1}', '{"b":2}']) == "json_object"
+    assert detect_pattern(["[1,2]", "[3,4]"]) == "json_array"
+    assert detect_pattern(["[]", "[]"]) == "json_array"
+    assert detect_pattern(["{1,1,1}", "{}", "{1}"]) == "braced_list"
+    assert detect_pattern(["a,b,c", "d,e"]) == "delimited_list"
     assert detect_pattern(["123", "456"]) == "numeric_string"
     assert detect_pattern(["hello", "world"]) is None
+    # multi-word free text must NOT be mistaken for a delimited list
+    assert detect_pattern(["Иван Иванович", "Пётр Петров"]) is None
     assert detect_pattern([]) is None
     assert detect_pattern(None) is None

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from t2r.agents.orchestrator.registry import RunRegistry
 from t2r.api.common.sse import sse_response
 from t2r.api.deps import AdminDep
+from t2r.services.profiling_service import ProfilingService
 from t2r.services.semantic_service import SemanticService
 from t2r.services.table_chat_service import TableChatService
 
@@ -92,11 +93,17 @@ async def toggle_columns(
     table_id: UUID,
     payload: ColumnsToggle,
     svc: FromDishka[SemanticService],
+    prof: FromDishka[ProfilingService],
     login: str = AdminDep,
 ) -> dict:
-    return await svc.set_columns_enabled(
+    res = await svc.set_columns_enabled(
         table_id, names=payload.names, enabled=payload.enabled, actor=login
     )
+    # Disabling mid-run: drop parked questions about these columns and unwedge
+    # the run if they were the only thing blocking it.
+    if payload.enabled is False:
+        await prof.unpark_after_disable(table_id, payload.names)
+    return res
 
 
 class TableAskRequest(BaseModel):

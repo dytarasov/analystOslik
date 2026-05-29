@@ -65,6 +65,7 @@ async def describe_columns(
             "examples": c.get("examples"),
             "value_catalog": _catalog_sample(c.get("value_catalog")),
             "value_range": c.get("value_range"),
+            "format": (c.get("value_range") or {}).get("pattern"),
         }
         for c in targets
     ]

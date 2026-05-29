@@ -36,14 +36,19 @@ async def update_column(
     column_id: UUID,
     payload: ColumnUpdate,
     svc: FromDishka[SemanticService],
+    prof: FromDishka[ProfilingService],
     login: str = AdminDep,
 ) -> dict:
     # enabled is a distinct lifecycle action (cascades notes/graph/relations), so
     # it's applied via its own service path; content fields go the normal route.
     if payload.enabled is not None:
-        await svc.set_column_enabled(
+        col = await svc.set_column_enabled(
             column_id, enabled=payload.enabled, actor=login, reason=payload.reason
         )
+        # Disabling mid-run: drop any parked question about this column and
+        # unwedge the run if that was the only thing blocking it.
+        if payload.enabled is False:
+            await prof.unpark_after_disable(col["table_id"], [col["name"]])
     if (
         payload.description is not None
         or payload.semantic_role is not None

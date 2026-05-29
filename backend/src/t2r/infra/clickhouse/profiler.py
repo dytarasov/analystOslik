@@ -148,6 +148,77 @@ class CHProfiler:
             return []
         return [r[0] for r in res.result_rows]
 
+    async def fetch_column_examples_batch(
+        self,
+        database: str,
+        table: str,
+        columns: list[dict[str, Any]],
+        *,
+        sample_len: int = 300,
+        sample_rows: int = 20000,
+        chunk: int = 80,
+        timeout: int = 30,
+    ) -> dict[str, list[str]]:
+        """Representative example values for EVERY column in one query per chunk.
+
+        Per column we take the *richest* non-null value (``argMaxIf`` over string
+        length — for a JSON/CSV/array blob this is a populated one, not a random
+        empty ``[]``) plus two random samples, each truncated to ``sample_len``.
+        This replaces the per-column round-trip so wide tables don't lose examples
+        for their tail columns — the gap that left the describer with no sample and
+        forced it to ask "what format is this column?" about data it should infer.
+
+        Aggregation runs over a bounded ``LIMIT sample_rows`` block, not the whole
+        table, so cost stays flat regardless of row count (stringifying large blob
+        columns over millions of rows would otherwise risk the time limit). Best-
+        effort: a failed chunk yields no examples for its columns rather than
+        aborting the harvest; columns are chunked to bound the aggregate count.
+        """
+        out: dict[str, list[str]] = {}
+        for start in range(0, len(columns), chunk):
+            block = columns[start : start + chunk]
+            inner_cols = ", ".join(
+                f"`{c['name'].replace('`', '``')}`" for c in block
+            )
+            parts: list[str] = []
+            layout: list[tuple[str, int]] = []  # name, base index into the row
+            idx = 0
+            for c in block:
+                safe = c["name"].replace("`", "``")
+                expr = f"substring(toString(`{safe}`), 1, {sample_len})"
+                parts.append(
+                    f"argMaxIf({expr}, length(toString(`{safe}`)), isNotNull(`{safe}`))"
+                )
+                parts.append(f"groupArraySampleIf(2)({expr}, isNotNull(`{safe}`))")
+                layout.append((c["name"], idx))
+                idx += 2
+            sql = (
+                f"SELECT {', '.join(parts)} FROM"
+                f" (SELECT {inner_cols} FROM {database}.{table} LIMIT {sample_rows})"
+                f" SETTINGS max_execution_time = {timeout}"
+            )
+            try:
+                res = await self.client.query(sql)
+            except Exception:
+                continue
+            if not res.result_rows:
+                continue
+            row = res.result_rows[0]
+            for name, base in layout:
+                richest = row[base]
+                samples = row[base + 1] or []
+                seen: list[str] = []
+                for v in [richest, *samples]:
+                    if v is None:
+                        continue
+                    sv = str(v)
+                    # Drop blanks; keep first occurrence (richest leads) up to 3.
+                    if sv and sv not in seen:
+                        seen.append(sv)
+                if seen:
+                    out[name] = seen[:3]
+        return out
+
     async def fetch_table_meta(self, database: str, table: str) -> dict[str, Any]:
         """Physical table metadata: engine, size, and the ClickHouse keys.
 

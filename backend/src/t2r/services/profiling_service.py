@@ -475,6 +475,69 @@ class ProfilingService:
                 if agent_run is not None and not agent_run.is_finished:
                     await agent_run.finalize(error=str(exc))
 
+    async def unpark_after_disable(
+        self, table_id: UUID, disabled_names: list[str]
+    ) -> None:
+        """Clean parked describe tasks after columns are disabled mid-run.
+
+        Disabling a column via the table UI while pass-2 is parked on a question
+        about it would otherwise (a) leave a dead question in the inbox and (b)
+        wedge the run forever. For each parked describe task of this table we drop
+        questions about now-disabled columns; a task left with none is re-queued
+        (pending) and the run resumed, so it finalizes with a best-effort
+        description instead of waiting on an unanswerable question. No-op unless
+        an active (running/paused) run exists for the column's source.
+        """
+        disabled = {str(n) for n in (disabled_names or [])}
+        if not disabled:
+            return
+        run_id_db: UUID | None = None
+        source_id: UUID | None = None
+        requeued = 0
+        async with self.sm() as s:
+            semantic = SemanticRepoPg(s)
+            table = await semantic.get_table(table_id)
+            if not table:
+                return
+            source_id = table["source_id"]
+            active = await ProfilingRepoPg(s).get_active(source_id)
+            if not active or active["status"] not in ("running", "paused"):
+                return
+            run_id_db = active["id"]
+            repo = ProfilingTaskRepo(s)
+            parked = await repo.list_by_run(
+                run_id_db, kind="describe_group", status="awaiting_input"
+            )
+            for t in parked:
+                if (t["database"], t["table_name"]) != (
+                    table["database"],
+                    table["table_name"],
+                ):
+                    continue
+                payload = dict(t.get("payload") or {})
+                qs = payload.get("questions") or []
+                kept = [
+                    q
+                    for q in qs
+                    if isinstance(q, dict) and q.get("column") not in disabled
+                ]
+                if len(kept) == len(qs):
+                    continue  # this task asked about nothing that got disabled
+                payload["questions"] = kept
+                if kept:
+                    await repo.set_status(t["id"], "awaiting_input", payload=payload)
+                else:
+                    await repo.set_status(t["id"], "pending", payload=payload)
+                    requeued += 1
+            await s.commit()
+        if requeued and source_id is not None and run_id_db is not None:
+            logger.info(
+                "v2: unparked tasks after column disable",
+                run_id=str(run_id_db),
+                requeued=requeued,
+            )
+            self._spawn(self._continue(source_id, run_id_db))
+
     async def get_column_selection(self, run_id_db: UUID) -> dict:
         """The dry-harvest snapshot the admin reviews at the gate: every table
         with its columns + the facts that inform a keep/drop decision."""
@@ -799,15 +862,35 @@ class ProfilingService:
                 run_id_db, kind="describe_group", status="awaiting_input"
             )
             run = await ProfilingRepoPg(s).get_run(run_id_db)
-        questions = [
-            {
-                "task_id": str(t["id"]),
-                "database": t["database"],
-                "table": t["table_name"],
-                "questions": (t.get("payload") or {}).get("questions") or [],
-            }
-            for t in awaiting
-        ]
+            # Surface only questions about currently-enabled columns: a column
+            # disabled after its question was parked must drop out of the inbox.
+            enabled_by_table: dict[tuple[str, str], set[str]] = {}
+            if awaiting and run:
+                semantic = SemanticRepoPg(s)
+                for t in await semantic.list_tables(run["source_id"]):
+                    cols = await semantic.get_columns(t["id"], only_enabled=True)
+                    enabled_by_table[(t["database"], t["table_name"])] = {
+                        c["name"] for c in cols
+                    }
+        questions = []
+        for t in awaiting:
+            enabled = enabled_by_table.get((t["database"], t["table_name"]))
+            qs = (t.get("payload") or {}).get("questions") or []
+            if enabled is not None:
+                qs = [
+                    q for q in qs
+                    if isinstance(q, dict) and q.get("column") in enabled
+                ]
+            if not qs:
+                continue  # nothing answerable left — don't show an empty card
+            questions.append(
+                {
+                    "task_id": str(t["id"]),
+                    "database": t["database"],
+                    "table": t["table_name"],
+                    "questions": qs,
+                }
+            )
         return {
             "status": (run or {}).get("status"),
             "agent_run_id": (run or {}).get("params", {}).get("agent_run_id") if run else None,

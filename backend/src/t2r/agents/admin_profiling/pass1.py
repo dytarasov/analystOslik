@@ -58,11 +58,22 @@ _RX_UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _RX_URL = re.compile(r"^https?://", re.IGNORECASE)
+# A delimited list of simple (space-free) tokens: "a,b,c" / "1;2;3" / "x|y".
+# Multi-word free text ("Иван Иванович, ...") won't match — tokens are space-free.
+_RX_DELIM = re.compile(r"^[^\s,;|]+(\s*[,;|]\s*[^\s,;|]+)+$")
 
 
 def detect_pattern(examples: list[Any] | None) -> str | None:
-    """Best-effort value-shape detection from a few sample values."""
-    vals = [str(v) for v in (examples or []) if v is not None][:8]
+    """Best-effort value-shape detection from a few sample values.
+
+    Returns a coarse machine label the describer renders so it can name the
+    storage format itself instead of asking the admin. JSON objects/arrays, the
+    ClickHouse braced array dump (``{1,2,3}``) and delimited lists are
+    distinguished because "in what format is this string stored?" was the single
+    most common needless question during profiling.
+    """
+    vals = [str(v).strip() for v in (examples or []) if v is not None]
+    vals = [v for v in vals if v][:8]
     if not vals:
         return None
     if all(_RX_EMAIL.match(v) for v in vals):
@@ -71,10 +82,28 @@ def detect_pattern(examples: list[Any] | None) -> str | None:
         return "uuid"
     if all(_RX_URL.match(v) for v in vals):
         return "url"
-    if all(v[:1] in "{[" for v in vals):
+    # JSON-ish: every value is brace/bracket-wrapped. Refine into object/array/
+    # braced; a mix of shapes falls back to the generic "json".
+    if all(v[:1] in "{[" and v[-1:] in "}]" for v in vals):
+        def _shape(v: str) -> str:
+            if v[:1] == "[":
+                return "array"
+            if '"' in v or ":" in v:
+                return "object"
+            return "braced"  # {1,2,3} — ClickHouse Array/tuple text representation
+
+        shapes = {_shape(v) for v in vals}
+        if shapes == {"object"}:
+            return "json_object"
+        if shapes == {"array"}:
+            return "json_array"
+        if shapes == {"braced"}:
+            return "braced_list"
         return "json"
     if all(v.isdigit() for v in vals):
         return "numeric_string"
+    if all(_RX_DELIM.match(v) for v in vals):
+        return "delimited_list"
     return None
 
 
@@ -136,11 +165,12 @@ async def harvest_table(
             ranges = await profiler.fetch_ranges(database, table, columns)
             ext = await profiler.fetch_extended_stats(database, table, columns)
 
-            examples: dict[str, list[Any]] = {}
-            for c in columns[:30]:
-                examples[c["name"]] = await profiler.fetch_column_examples(
-                    database, table, c["name"]
-                )
+            # Examples for EVERY column in one scan per chunk — the old
+            # ``columns[:30]`` cap left wide tables' tail columns sample-less, and
+            # those are exactly the blob columns the describer then asked about.
+            examples = await profiler.fetch_column_examples_batch(
+                database, table, columns
+            )
 
             catalogs: dict[str, list[dict[str, Any]]] = {}
             budget = CATALOG_BUDGET_PER_TABLE

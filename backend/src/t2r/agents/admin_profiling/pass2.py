@@ -10,6 +10,7 @@ caveats/confidence) and lands in sem_columns.semantics.
 """
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,44 @@ from t2r.logging import get_logger
 logger = get_logger("profiling_pass2")
 
 MAX_QUESTION_ROUNDS = 2
+
+# Phrases that signal a question about a fact the profiler already provides
+# (type / format / length / examples / null / distinct). Such questions are
+# dropped — the describer must infer these from the facts block, never ask.
+_DERIVABLE_Q_RX = re.compile(
+    r"в\s+каком\s+формате|какой\s+формат|формат\s+(хранени|строк|значени)"
+    r"|тип\s+(данны|колонк)|реальн\w*\s+тип|какого\s+типа"
+    r"|внутренн\w*\s+структур|структур\w*\s+строк"
+    r"|через\s+запят|(json|csv)\b.{0,12}(или|через)"
+    r"|пример\w*\s+значени|сколько\s+уникальн|долю?\s+null",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_questions(
+    questions: Any, enabled_names: set[str]
+) -> list[dict[str, Any]]:
+    """Keep only questions worth surfacing to the admin.
+
+    Drops (1) questions whose ``column`` isn't a currently-enabled column of this
+    table — strays about disabled / peer / hallucinated columns (the reported
+    "asks about excluded fields"); and (2) questions about derivable facts
+    (type / format / examples …) that slipped past the prompt discipline. With
+    the facts block now complete (examples for every column), a real
+    business-meaning question is the rare exception, so over-filtering here is
+    cheap insurance: at worst a column ships with a best-effort description.
+    """
+    out: list[dict[str, Any]] = []
+    for q in questions if isinstance(questions, list) else []:
+        if not isinstance(q, dict):
+            continue
+        col = q.get("column")
+        if not col or col not in enabled_names:
+            continue
+        if _DERIVABLE_Q_RX.search(str(q.get("text") or "")):
+            continue
+        out.append(q)
+    return out
 
 
 @dataclass
@@ -202,6 +241,7 @@ async def _describe_group_task(
                 "examples": c.get("examples"),
                 "value_catalog": _catalog_sample(c.get("value_catalog"), 30),
                 "value_range": c.get("value_range"),
+                "format": (c.get("value_range") or {}).get("pattern"),
             }
             for c in target_cols
         ]
@@ -223,7 +263,10 @@ async def _describe_group_task(
         except Exception:
             obj = {}
 
-        questions = obj.get("questions") or []
+        # Only genuine, answerable business questions about enabled columns of
+        # this table survive — see _sanitize_questions. Everything else falls
+        # through to apply the best-effort descriptions instead of parking.
+        questions = _sanitize_questions(obj.get("questions"), set(by_name))
         if questions and round_no < MAX_QUESTION_ROUNDS:
             # Park for the admin. Keep prior answers; the inbox fills payload.answers.
             return TaskResult(
