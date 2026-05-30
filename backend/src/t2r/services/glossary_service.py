@@ -68,6 +68,32 @@ class GlossaryService:
         if not glossary:
             return GlossaryIngestResult(ok=False, warnings=["Глоссарий пуст — нечего разбирать"])
 
+        # The structural ingest attaches field semantics and join relations to
+        # *profiled* tables (find_table / find_column). Before profiling those
+        # tables don't exist, so a run here would silently drop every column and
+        # relation while still marking the glossary "разобрано" — a misleading
+        # half-ingest. Refuse until the source is profiled. The verbatim glossary
+        # text already feeds the describers via _load_glossary, so saving it
+        # pre-profiling is useful — only this structural step waits.
+        if src.profiling_status == "in_progress":
+            return GlossaryIngestResult(
+                ok=False,
+                warnings=["Идёт профилирование — дождитесь завершения, затем «Разобрать»"],
+            )
+        # Positive existence check (not a status denylist): the structural ingest
+        # attaches field semantics + relations to PROFILED tables, so require at
+        # least one. Covers never_profiled, AND a 'failed' run that produced zero
+        # tables — both previously slipped through and silently half-ingested
+        # (columns/relations dropped) while still stamping ingested_at.
+        if not await self.semantic_repo.list_tables(source_id):
+            return GlossaryIngestResult(
+                ok=False,
+                warnings=[
+                    "Сначала профилируйте источник — «Разобрать» привязывает поля"
+                    " и связи к таблицам, которых ещё нет"
+                ],
+            )
+
         prompt = self.prompts.render("glossary_ingest", glossary=glossary)
         raw = await self.llm.complete(
             [{"role": "user", "content": prompt}],

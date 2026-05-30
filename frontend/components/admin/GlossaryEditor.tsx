@@ -38,6 +38,13 @@ export function GlossaryEditor({
   // Editing the glossary clears ingested_at on the server, so "stale" means we
   // have content saved but it hasn't been re-ingested yet.
   const needsIngest = !empty && !dirty && !ingestedAt;
+  // "Разобрать" attaches field semantics + join relations to PROFILED tables;
+  // before profiling they don't exist, so the ingest would silently drop them
+  // and still mark itself done. Gate it until the source has been profiled
+  // (the verbatim text still helps the describers, so Save stays open).
+  const canIngest =
+    source.profiling_status !== "never_profiled" &&
+    source.profiling_status !== "in_progress";
 
   async function save() {
     setSaving(true);
@@ -82,9 +89,10 @@ export function GlossaryEditor({
         </span>
         <CardTitle className="pt-1 text-base">House rules, поля, эталонные SQL и метрики</CardTitle>
         <CardDescription>
-          Сохранённый текст подставляется агенту в системный промпт как авторитетный.
-          «Разобрать» раскладывает его в семантический слой (заметки с эмбеддингами,
-          метрики, термины, связи) для точечного retrieval.
+          Сохранённый текст агент всегда видит в системном промпте как авторитетный.
+          «Разобрать» (доступно после профилирования) дополнительно раскладывает глоссарий
+          в семантический слой — термины, метрики, заметки для поиска, смыслы полей и связи
+          между таблицами, — чтобы агент находил это точечно через retrieval.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -103,10 +111,11 @@ export function GlossaryEditor({
           </Button>
           <Button
             onClick={ingest}
-            disabled={ingesting || empty || dirty}
+            disabled={ingesting || empty || dirty || !canIngest}
             variant="outline"
             size="sm"
             className="gap-1.5 font-mono"
+            title="Разложить сохранённый глоссарий в семантический слой: термины, метрики, заметки (RAG), смыслы полей и связи между таблицами. Доступно после профилирования источника."
           >
             {ingesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
             Разобрать
@@ -114,28 +123,38 @@ export function GlossaryEditor({
           <span className="label-mono ml-auto flex items-center gap-2">
             {dirty
               ? "есть несохранённые правки"
-              : needsIngest
-                ? "сохранено · не разобрано"
-                : `разобрано: ${fmt(ingestedAt)}`}
+              : !canIngest
+                ? "ожидает профилирования"
+                : needsIngest
+                  ? "сохранено · не разобрано"
+                  : `разобрано: ${fmt(ingestedAt)}`}
             <span
               className={
                 "h-1.5 w-1.5 rounded-full " +
                 (dirty
                   ? "bg-warning"
-                  : needsIngest
-                    ? "bg-warning/70"
-                    : ingestedAt
-                      ? "bg-success/70"
-                      : "bg-muted-foreground/40")
+                  : !canIngest
+                    ? "bg-muted-foreground/40"
+                    : needsIngest
+                      ? "bg-warning/70"
+                      : ingestedAt
+                        ? "bg-success/70"
+                        : "bg-muted-foreground/40")
               }
             />
           </span>
         </div>
-        {dirty && (
+        {!canIngest && !empty ? (
+          <p className="font-mono text-[11px] text-muted-foreground">
+            «Разобрать» станет доступно после профилирования источника: структурный разбор
+            привязывает поля и связи к таблицам, которых сейчас ещё нет. Текст уже сохранён и
+            помогает профайлеру.
+          </p>
+        ) : dirty ? (
           <p className="font-mono text-[11px] text-muted-foreground">
             Сохраните, чтобы «Разобрать» стало доступно — ингест работает по сохранённому тексту.
           </p>
-        )}
+        ) : null}
       </CardContent>
     </Card>
   );
