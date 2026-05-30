@@ -378,10 +378,10 @@ class ProfilingService:
         if counts.get("awaiting_input", 0) > 0:
             # Persist run-level 'awaiting_input' so a backend restart doesn't
             # abandon a run that's merely waiting on a human answer (it's excluded
-            # from ABANDON_ON_RESTART). The parked task carries its questions and
-            # is fully resumable once answered.
+            # from ABANDON_ON_RESTART). Guarded write — never resurrect a run that
+            # a concurrent/late drain already finalized (would wedge the source).
             async with self.sm() as s:
-                await ProfilingRepoPg(s).set_status(run_id_db, "awaiting_input")
+                await ProfilingRepoPg(s).mark_awaiting_input(run_id_db)
                 await s.commit()
             await self._sync_status(source_id)
             logger.info("v2: parked on questions", run_id=str(run_id_db), n=counts["awaiting_input"])
@@ -488,6 +488,17 @@ class ProfilingService:
             if agent_run is not None:
                 agent_run.attach_task(asyncio.current_task())  # type: ignore[arg-type]
             glossary = await self._load_glossary(source_id)
+            # Serialized by the lock above: if an earlier resume already finalized
+            # this run, do NOT resurrect it — flipping a done/failed/cancelled run
+            # back to 'running' would wedge the source's single-active slot.
+            async with self.sm() as s:
+                cur = await ProfilingRepoPg(s).get_run(run_id_db)
+            if cur and cur["status"] in ("done", "failed", "cancelled"):
+                logger.info(
+                    "v2: continue on terminal run, skip",
+                    run_id=str(run_id_db), status=cur["status"],
+                )
+                return
             try:
                 # A parked run sits in 'awaiting_input' (so a restart can't abandon
                 # it); flip back to 'running' now that we're resuming, so a second
@@ -527,10 +538,11 @@ class ProfilingService:
                 if agent_run is not None and not agent_run.is_finished:
                     await agent_run.finalize(error=str(exc))
             finally:
-                # Always reconcile denormalized status (runs on cancel too) and
-                # drop the per-run lock so the dict can't grow unbounded.
+                # Always reconcile denormalized status (runs on cancel too).
+                # NB: do NOT evict the per-run lock here — popping it while still
+                # held inside `async with self._resume_lock` would hand a later
+                # caller a fresh Lock and break serialization (concurrent drains).
                 await self._sync_status(source_id)
-                self._resume_locks.pop(str(run_id_db), None)
 
     async def unpark_after_disable(
         self, table_id: UUID, disabled_names: list[str]
@@ -742,9 +754,9 @@ class ProfilingService:
                 if agent_run is not None and not agent_run.is_finished:
                     await agent_run.finalize(error=str(exc))
             finally:
-                # Reconcile status on every exit (incl. cancel) + evict the lock.
+                # Reconcile status on every exit (incl. cancel). Do NOT evict the
+                # per-run lock while still holding it — that breaks serialization.
                 await self._sync_status(source_id)
-                self._resume_locks.pop(str(run_id_db), None)
 
     async def _load_glossary(self, source_id: UUID) -> str:
         """The source's human glossary text (capped), fed to profiling prompts as

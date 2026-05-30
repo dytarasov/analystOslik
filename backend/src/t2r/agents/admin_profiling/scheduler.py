@@ -116,7 +116,10 @@ class TaskScheduler:
             logger.exception("scheduler.task: handler raised", task_id=str(task_id), kind=task["kind"])
             res = TaskResult("failed", error=str(exc))
 
-        if res.status == "failed" and task["attempts"] < self.max_attempts:
+        # attempts is now a PRE-increment failure counter (0 on first run, bumped
+        # only on the retry below), so the gate is max_attempts-1 to keep the total
+        # at max_attempts executions (e.g. 3 = first try + 2 retries).
+        if res.status == "failed" and task["attempts"] < self.max_attempts - 1:
             # Transient — put it back for another attempt, bumping the genuine
             # transient-failure counter (claim_next no longer touches attempts).
             async with self.sm() as session:

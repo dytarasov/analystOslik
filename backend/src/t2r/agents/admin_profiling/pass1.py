@@ -88,7 +88,10 @@ def detect_pattern(examples: list[Any] | None) -> str | None:
     # treat a long opener as structured too. Refine into object/array/braced; a
     # mix of shapes falls back to the generic "json".
     def _structured(v: str) -> bool:
-        return v[:1] in "{[" and (v[-1:] in "}]" or len(v) >= 200)
+        # Relax the closing-bracket requirement only when the value is actually at
+        # the example-truncation length (300, see fetch_column_examples_batch),
+        # not for shorter bracket-prefixed free text like "[TAG] …".
+        return v[:1] in "{[" and (v[-1:] in "}]" or len(v) >= 300)
 
     if all(_structured(v) for v in vals):
         def _shape(v: str) -> str:

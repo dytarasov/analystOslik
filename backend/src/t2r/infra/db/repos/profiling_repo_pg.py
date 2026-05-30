@@ -82,6 +82,18 @@ class ProfilingRepoPg:
         ).first()
         return row[0] if row else None
 
+    async def mark_awaiting_input(self, run_id: UUID) -> None:
+        """Park a run on a human question — guarded so a stray late drain can't
+        resurrect an already-finalized run back to an (active, restart-surviving)
+        'awaiting_input' state and wedge the source."""
+        await self.session.execute(
+            text(
+                "UPDATE profiling_runs SET status = 'awaiting_input'"
+                " WHERE id = :id AND status NOT IN ('done', 'failed', 'cancelled')"
+            ),
+            {"id": run_id},
+        )
+
     async def create_run(
         self, source_id: UUID, *, requested_by: str | None, params: dict
     ) -> UUID:

@@ -281,7 +281,16 @@ class ProfilingTaskRepo:
         ).all()
         expected -= {(r[0], r[1], str(r[2])) for r in disabled_rows}
 
-        covered_rows = (
+        # Covered = columns a terminal describe_group task claims (task bookkeeping)
+        # UNION columns that actually carry a description in the persisted layer
+        # (or are curated-locked). The persisted-layer half credits columns whose
+        # group task 'failed' on a single stubborn sibling — so `missing` lists
+        # only the truly-undescribed ones instead of a lone bad column dragging its
+        # already-described siblings down and failing the whole run. The task half
+        # is now accurate too: the pass-2 guard only lets a describe_group reach
+        # 'done' once all its enabled, non-locked columns have descriptions.
+        covered: set[tuple[str, str, str]] = set()
+        task_rows = (
             await self.session.execute(
                 text(
                     "SELECT database, table_name, columns FROM profiling_tasks"
@@ -291,10 +300,25 @@ class ProfilingTaskRepo:
                 {"rid": run_id},
             )
         ).mappings().all()
-        covered: set[tuple[str, str, str]] = set()
-        for c in covered_rows:
+        for c in task_rows:
             for col in c["columns"] or []:
                 covered.add((c["database"], c["table_name"], str(col)))
+        desc_rows = (
+            await self.session.execute(
+                text(
+                    "SELECT t.database, t.table_name, c.name"
+                    " FROM sem_columns c"
+                    " JOIN sem_tables t ON t.id = c.table_id"
+                    " JOIN profiling_runs r ON r.source_id = t.source_id"
+                    " WHERE r.id = :rid AND c.enabled = true"
+                    "   AND (c.locked = true"
+                    "        OR (c.description IS NOT NULL"
+                    "            AND length(btrim(c.description)) > 0))"
+                ),
+                {"rid": run_id},
+            )
+        ).all()
+        covered |= {(r[0], r[1], str(r[2])) for r in desc_rows}
 
         missing = sorted(expected - covered)
         return {

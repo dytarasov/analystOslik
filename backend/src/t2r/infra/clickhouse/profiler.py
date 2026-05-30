@@ -444,26 +444,37 @@ class CHProfiler:
         to_column: str,
         *,
         sample: int = 2000,
-        to_sample: int = 200_000,
         timeout: int = 15,
     ) -> dict[str, Any]:
-        """Sampled fraction of distinct from-values present in the target column.
+        """Fraction of a distinct from-sample present in the target column.
 
         High overlap is strong evidence the columns form a real join key, far
-        more reliable than name/type heuristics alone. Both sides are bounded
-        (``LIMIT``) — the target IN-set in particular, or ClickHouse materialises
-        the whole target column into an in-memory hash set (multi-GB / OOM on a
-        large fact table, ×budget per source table). Approximate overlap is fine
-        for a heuristic gated on RELATION_MIN_OVERLAP.
+        more reliable than name/type heuristics alone. Memory-safe AND exact for
+        the sample: we take ``sample`` distinct from-values, then restrict the
+        (possibly huge) target to only those values before testing membership —
+        so the IN-set materialises ≤ ``sample`` distinct values instead of the
+        whole target column (which would OOM), WITHOUT an unordered ``LIMIT`` on
+        the target that systematically skews to the low primary-key range and
+        silently rejected real FKs on big tables.
         """
         fcol = from_column.replace("`", "``")
         tcol = to_column.replace("`", "``")
+        fdb_q, ftbl_q = _qid(from_db), _qid(from_table)
+        tdb_q, ttbl_q = _qid(to_db), _qid(to_table)
+        driver = (
+            f"SELECT DISTINCT `{fcol}` AS v FROM {fdb_q}.{ftbl_q}"
+            f" WHERE isNotNull(`{fcol}`) LIMIT {int(sample)}"
+        )
+        from_keys = (
+            f"SELECT DISTINCT `{fcol}` FROM {fdb_q}.{ftbl_q}"
+            f" WHERE isNotNull(`{fcol}`) LIMIT {int(sample)}"
+        )
+        target = (
+            f"SELECT `{tcol}` FROM {tdb_q}.{ttbl_q} WHERE `{tcol}` IN ({from_keys})"
+        )
         sql = (
-            f"SELECT count() AS total,"
-            f" countIf(v IN (SELECT `{tcol}` FROM {_qid(to_db)}.{_qid(to_table)}"
-            f"   WHERE isNotNull(`{tcol}`) LIMIT {int(to_sample)})) AS matched"
-            f" FROM (SELECT DISTINCT `{fcol}` AS v FROM {_qid(from_db)}.{_qid(from_table)}"
-            f"        WHERE isNotNull(`{fcol}`) LIMIT {int(sample)})"
+            f"SELECT count() AS total, countIf(v IN ({target})) AS matched"
+            f" FROM ({driver})"
         )
         try:
             res = await self.client.query(sql, settings={"max_execution_time": timeout})
@@ -492,7 +503,10 @@ class CHProfiler:
                 " GROUP BY query ORDER BY cnt DESC LIMIT {lim:UInt32}",
                 parameters={
                     "days": days,
-                    "qt": f"{_qid(database)}.{_qid(table)}",
+                    # NB: this is a VALUE compared against system.query_log.tables
+                    # (stored UNquoted), not a FROM-clause identifier — must not be
+                    # _qid-quoted, and it's a bound {qt:String} param (injection-safe).
+                    "qt": f"{database}.{table}",
                     "lim": limit,
                 },
             )

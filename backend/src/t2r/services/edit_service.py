@@ -7,7 +7,7 @@ from neo4j import AsyncDriver
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from t2r.agents.admin_edit.pipeline import build_admin_edit_pipeline
-from t2r.agents.admin_profiling.describe import ColumnDescribeError, describe_columns
+from t2r.agents.admin_profiling.describe import describe_columns
 from t2r.agents.admin_profiling.note_writer import rebuild_table_notes
 from t2r.agents.admin_profiling.pass2 import group_columns
 from t2r.agents.admin_profiling.pipeline import _format_sample
@@ -171,18 +171,27 @@ class _ReprofileColumnsStep(Step):
                         names=[c["name"] for c in group],
                     )
                     await s.commit()
-                except ColumnDescribeError:
-                    # Best-effort per group: an empty LLM reply for one group
-                    # doesn't nuke the whole re-profile, but a total wipeout does.
+                except Exception as exc:  # noqa: BLE001
+                    # Best-effort per group: a failure here must NOT abort the step.
+                    # Phase 1 (table summary) is already committed, so raising would
+                    # report the run 'failed' while the summary stands (status lie)
+                    # and skip the notes rebuild. Skip the group, keep its prior
+                    # description, and finish — mirrors the per-group design.
                     failed_groups += 1
                     logger.warning(
-                        "regenerate: column group describe returned nothing",
+                        "regenerate: column group describe failed — skipped",
                         table_id=str(self.table_id),
                         group=[c["name"] for c in group],
+                        error=str(exc),
                     )
         if groups and failed_groups == len(groups):
-            raise RuntimeError(
-                "Ни одну колонку не удалось описать — LLM вернул пустые ответы"
+            # Nothing described, but phase 1 stands and columns keep prior
+            # descriptions — report (non-fatally) rather than wedge the run 'failed'.
+            await run.emit(
+                step_progress(
+                    self.step_id, 0.95,
+                    "Колонки не переописаны (LLM недоступен) — описание таблицы обновлено",
+                )
             )
         # Rebuild RAG notes + resync graph from the now-described enabled columns
         # so the agent immediately sees the refreshed (and newly re-included) ones.

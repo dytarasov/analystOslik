@@ -233,7 +233,10 @@ async def test_scheduler_retries_then_succeeds(ctx) -> None:
         await s.commit()
 
     async def flaky(task: dict) -> TaskResult:
-        # `attempts` was incremented by claim_next, so it's 1 on the first run.
+        # `attempts` is now a pre-increment transient-failure counter (0 on the
+        # first run; bumped only on the retry path, not by claim_next). With
+        # max_attempts=3 the gate allows 2 retries, so attempts hits 2 on the 3rd
+        # execution — fail on 0/1, succeed on 2.
         if task["attempts"] < 2:
             raise RuntimeError("transient")
         return TaskResult("done")
