@@ -131,6 +131,7 @@ class AppProvider(Provider):
         sm: async_sessionmaker[AsyncSession],
         driver: AsyncDriver,
         llm: LLMClient,
+        emb: EmbeddingsClient,
         prompts: PromptLoader,
         registry: RunRegistry,
     ) -> EditService:
@@ -138,6 +139,7 @@ class AppProvider(Provider):
             sessionmaker=sm,
             neo4j_driver=driver,
             llm=llm,
+            embeddings=emb,
             prompts=prompts,
             registry=registry,
         )

@@ -292,7 +292,20 @@ export function ColumnEditor({
       </div>
 
       <div className="px-3 py-2">
-        {editing ? (
+        {!isEnabled ? (
+          // Excluded columns aren't editable: a saved description here would be
+          // ignored by the agent/RAG/graph (enabled=false filters it out), which
+          // made users think "I saved it but it vanished". Re-enable to edit.
+          <div className="text-sm">
+            <span className="text-muted-foreground italic">
+              {column.description || "нет описания"}
+            </span>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Колонка исключена из исследования — верните её иконкой глаза, чтобы
+              описание учитывалось и его можно было редактировать.
+            </p>
+          </div>
+        ) : editing ? (
           <div className="space-y-2">
             <textarea
               ref={textareaRef}

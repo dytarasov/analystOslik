@@ -165,7 +165,7 @@ export default function TableEditorPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Tooltip label="Заново описать таблицу через LLM, учитывая ваши комментарии">
+          <Tooltip label="Перепрофилировать таблицу: заново описать саму таблицу и все ВКЛЮЧЁННЫЕ колонки (включая возвращённые). Исключённые останутся скрыты, ваши ручные правки сохранятся.">
             <Button
               onClick={onRegenerate}
               variant="outline"
@@ -173,7 +173,7 @@ export default function TableEditorPage() {
               className="gap-1.5"
             >
               <RotateCw className={"h-4 w-4" + (regenerating ? " animate-spin" : "")} />
-              Перегенерировать
+              Перепрофилировать
             </Button>
           </Tooltip>
           <Button onClick={onSave} disabled={saving}>
