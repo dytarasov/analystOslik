@@ -34,6 +34,17 @@ def is_string_type(t: str) -> bool:
     return _base_type(t).startswith(("String", "FixedString"))
 
 
+def _qid(name: str) -> str:
+    """Backtick-quote a ClickHouse identifier (db / table / column).
+
+    Identifiers (database, table) flow in from the admin-supplied selection, so
+    interpolating them raw into a FROM clause was both an injection sink and a
+    breakage on reserved/special names (`select`, `2024_data`, spaces). Quote them
+    the same way column identifiers already are.
+    """
+    return "`" + str(name).replace("`", "``") + "`"
+
+
 class CHProfiler:
     def __init__(self, client: CHClient) -> None:
         self.client = client
@@ -79,9 +90,16 @@ class CHProfiler:
         ]
 
     async def fetch_ddl(self, database: str, table: str) -> str:
-        res = await self.client.query(
-            f"SHOW CREATE TABLE {database}.{table}"
-        )
+        """Best-effort + time-bounded: a slow/failing SHOW CREATE must not abort an
+        otherwise-successful table harvest (every other probe degrades to a safe
+        default)."""
+        try:
+            res = await self.client.query(
+                f"SHOW CREATE TABLE {_qid(database)}.{_qid(table)}",
+                settings={"max_execution_time": 10},
+            )
+        except Exception:
+            return ""
         rows = res.result_rows
         return str(rows[0][0]) if rows else ""
 
@@ -89,7 +107,7 @@ class CHProfiler:
         self, database: str, table: str, limit: int = 100, timeout: int = 10
     ) -> dict[str, Any]:
         res = await self.client.query(
-            f"SELECT * FROM {database}.{table} LIMIT {limit}",
+            f"SELECT * FROM {_qid(database)}.{_qid(table)} LIMIT {limit}",
             settings={"max_execution_time": timeout},
         )
         columns = list(res.column_names)
@@ -109,13 +127,16 @@ class CHProfiler:
             agg_parts.append(f"countIf(isNull(`{safe}`)) AS _null_{c['position']}")
             agg_parts.append(f"uniqHLL12(`{safe}`) AS _uniq_{c['position']}")
         sql = (
-            f"SELECT {', '.join(agg_parts)} FROM {database}.{table} "
+            f"SELECT {', '.join(agg_parts)} FROM {_qid(database)}.{_qid(table)} "
             "SETTINGS max_execution_time = 30"
         )
-        try:
-            res = await self.client.query(sql)
-        except Exception:
-            return {}
+        # Let a genuine ClickHouse error PROPAGATE: this is the gating probe whose
+        # result persists distinct/null_ratio/total and seeds value catalogs.
+        # Swallowing it to {} silently shipped an all-NULL-stats table as a clean
+        # 'done' that never self-heals on resume; instead let the harvest task fail
+        # and be retried. The empty case is covered by the `if not columns` guard
+        # above and the row guard below.
+        res = await self.client.query(sql)
         if not res.result_rows:
             return {}
         row = res.result_rows[0]
@@ -140,7 +161,7 @@ class CHProfiler:
         safe = column.replace("`", "``")
         try:
             res = await self.client.query(
-                f"SELECT DISTINCT `{safe}` FROM {database}.{table} "
+                f"SELECT DISTINCT `{safe}` FROM {_qid(database)}.{_qid(table)} "
                 f"WHERE isNotNull(`{safe}`) LIMIT {n} "
                 "SETTINGS max_execution_time = 10"
             )
@@ -194,12 +215,20 @@ class CHProfiler:
                 idx += 2
             sql = (
                 f"SELECT {', '.join(parts)} FROM"
-                f" (SELECT {inner_cols} FROM {database}.{table} LIMIT {sample_rows})"
+                f" (SELECT {inner_cols} FROM {_qid(database)}.{_qid(table)} LIMIT {sample_rows})"
                 f" SETTINGS max_execution_time = {timeout}"
             )
             try:
                 res = await self.client.query(sql)
             except Exception:
+                # One un-stringifiable column (e.g. AggregateFunction) makes the
+                # whole-chunk query fail. Fall back to isolating per column so the
+                # rest of the chunk still gets examples.
+                for c in block:
+                    ex = await self.fetch_column_examples(database, table, c["name"], n=3)
+                    vals = [str(v) for v in ex if v is not None and str(v)]
+                    if vals:
+                        out[c["name"]] = vals[:3]
                 continue
             if not res.result_rows:
                 continue
@@ -287,7 +316,7 @@ class CHProfiler:
         safe = column.replace("`", "``")
         try:
             res = await self.client.query(
-                f"SELECT `{safe}` AS v, count() AS c FROM {database}.{table}"
+                f"SELECT `{safe}` AS v, count() AS c FROM {_qid(database)}.{_qid(table)}"
                 f" WHERE isNotNull(`{safe}`) GROUP BY v ORDER BY c DESC LIMIT {limit}",
                 settings={"max_execution_time": timeout},
             )
@@ -336,7 +365,7 @@ class CHProfiler:
             else:
                 layout.append((c["name"], False, idx))
                 idx += 2
-        sql = f"SELECT {', '.join(select_parts)} FROM {database}.{table}"
+        sql = f"SELECT {', '.join(select_parts)} FROM {_qid(database)}.{_qid(table)}"
         try:
             res = await self.client.query(sql, settings={"max_execution_time": timeout})
         except Exception:
@@ -386,7 +415,7 @@ class CHProfiler:
                 break
         if not parts:
             return {}
-        sql = f"SELECT {', '.join(parts)} FROM {database}.{table}"
+        sql = f"SELECT {', '.join(parts)} FROM {_qid(database)}.{_qid(table)}"
         try:
             res = await self.client.query(sql, settings={"max_execution_time": timeout})
         except Exception:
@@ -415,20 +444,26 @@ class CHProfiler:
         to_column: str,
         *,
         sample: int = 2000,
+        to_sample: int = 200_000,
         timeout: int = 15,
     ) -> dict[str, Any]:
         """Sampled fraction of distinct from-values present in the target column.
 
         High overlap is strong evidence the columns form a real join key, far
-        more reliable than name/type heuristics alone.
+        more reliable than name/type heuristics alone. Both sides are bounded
+        (``LIMIT``) — the target IN-set in particular, or ClickHouse materialises
+        the whole target column into an in-memory hash set (multi-GB / OOM on a
+        large fact table, ×budget per source table). Approximate overlap is fine
+        for a heuristic gated on RELATION_MIN_OVERLAP.
         """
         fcol = from_column.replace("`", "``")
         tcol = to_column.replace("`", "``")
         sql = (
             f"SELECT count() AS total,"
-            f" countIf(v IN (SELECT `{tcol}` FROM {to_db}.{to_table})) AS matched"
-            f" FROM (SELECT DISTINCT `{fcol}` AS v FROM {from_db}.{from_table}"
-            f"        WHERE isNotNull(`{fcol}`) LIMIT {sample})"
+            f" countIf(v IN (SELECT `{tcol}` FROM {_qid(to_db)}.{_qid(to_table)}"
+            f"   WHERE isNotNull(`{tcol}`) LIMIT {int(to_sample)})) AS matched"
+            f" FROM (SELECT DISTINCT `{fcol}` AS v FROM {_qid(from_db)}.{_qid(from_table)}"
+            f"        WHERE isNotNull(`{fcol}`) LIMIT {int(sample)})"
         )
         try:
             res = await self.client.query(sql, settings={"max_execution_time": timeout})
@@ -457,7 +492,7 @@ class CHProfiler:
                 " GROUP BY query ORDER BY cnt DESC LIMIT {lim:UInt32}",
                 parameters={
                     "days": days,
-                    "qt": f"{database}.{table}",
+                    "qt": f"{_qid(database)}.{_qid(table)}",
                     "lim": limit,
                 },
             )

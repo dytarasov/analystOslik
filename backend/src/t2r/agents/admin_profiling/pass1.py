@@ -82,9 +82,15 @@ def detect_pattern(examples: list[Any] | None) -> str | None:
         return "uuid"
     if all(_RX_URL.match(v) for v in vals):
         return "url"
-    # JSON-ish: every value is brace/bracket-wrapped. Refine into object/array/
-    # braced; a mix of shapes falls back to the generic "json".
-    if all(v[:1] in "{[" and v[-1:] in "}]" for v in vals):
+    # JSON-ish: every value is brace/bracket-wrapped. Truncation-tolerant — the
+    # richest (longest) example is captured and truncated (~300 chars), so a large
+    # JSON/array blob is cut mid-string and no longer ends with a closing bracket;
+    # treat a long opener as structured too. Refine into object/array/braced; a
+    # mix of shapes falls back to the generic "json".
+    def _structured(v: str) -> bool:
+        return v[:1] in "{[" and (v[-1:] in "}]" or len(v) >= 200)
+
+    if all(_structured(v) for v in vals):
         def _shape(v: str) -> str:
             if v[:1] == "[":
                 return "array"
@@ -158,7 +164,6 @@ async def harvest_table(
         try:
             profiler = CHProfiler(client)
             columns = await profiler.fetch_columns(database, table)
-            ddl = await profiler.fetch_ddl(database, table)
             stats = await profiler.fetch_column_stats(database, table, columns)
             meta = await profiler.fetch_table_meta(database, table)
             col_keys = await profiler.fetch_column_keys(database, table)
@@ -293,8 +298,19 @@ async def build_relations_for_source(
                 }
             )
 
-        client = await CHClientFactory(source_repo).for_source(source_id)
         created = 0
+        # Relation inference is best-effort (heuristic FKs verified by value
+        # overlap). A transient ClickHouse failure here must NOT fail a run whose
+        # every column already harvested+described — skip relations and let the
+        # run finalize. (Per-candidate overlap errors are already swallowed below.)
+        try:
+            client = await CHClientFactory(source_repo).for_source(source_id)
+        except Exception:
+            logger.exception(
+                "pass1.relations: ClickHouse connect failed — skipping (best-effort)",
+                run_id=str(run_id),
+            )
+            return 0
         try:
             profiler = CHProfiler(client)
             for t in described:

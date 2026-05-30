@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 ACTIVE_STATUSES: tuple[str, ...] = ("pending", "running", "awaiting_input", "paused")
 
-# Statuses we abandon on backend restart. 'paused' is deliberately excluded: a
-# run waiting at the column-selection gate has all pass-1 facts persisted and can
-# be resumed off the DB (apply_column_selection works without the in-memory run),
-# so killing it would force a full re-profile of the source for nothing.
-ABANDON_ON_RESTART: tuple[str, ...] = ("pending", "running", "awaiting_input")
+# Statuses we abandon on backend restart. 'paused' (column-selection gate) AND
+# 'awaiting_input' (waiting on a human answer) are deliberately excluded: both
+# have all prior work persisted in profiling_tasks and resume off the DB
+# (apply_column_selection / answer_question work without the in-memory run), so
+# abandoning them would force a needless full re-profile. 'pending'/'running' had
+# a live in-memory worker that's now gone, so they are abandoned.
+ABANDON_ON_RESTART: tuple[str, ...] = ("pending", "running")
 
 
 class ProfilingRepoPg:

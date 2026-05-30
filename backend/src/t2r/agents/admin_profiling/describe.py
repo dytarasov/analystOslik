@@ -21,6 +21,12 @@ _SEMANTICS_KEYS = (
 )
 
 
+class ColumnDescribeError(Exception):
+    """The describer returned nothing usable (unparseable / empty / no matching
+    column) for columns that were asked to be described. Raised so callers don't
+    silently report success on a column that stays description-less."""
+
+
 def _catalog_sample(cat: Any, n: int = 30) -> str:
     if not isinstance(cat, list) or not cat:
         return ""
@@ -100,4 +106,11 @@ async def describe_columns(
             semantics=semantics or None,
         )
         n += 1
+    if n == 0:
+        # targets is non-empty here (guarded above), so a zero count means the
+        # reply was unparseable / empty / matched no requested column.
+        raise ColumnDescribeError(
+            f"describer returned no usable columns for "
+            f"{table['database']}.{table['table_name']}"
+        )
     return n

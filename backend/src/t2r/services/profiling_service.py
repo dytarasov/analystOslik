@@ -130,7 +130,16 @@ class ProfilingService:
             existing = await ProfilingRepoPg(s).get_active(source_id)
             if existing:
                 existing_agent_id = (existing.get("params") or {}).get("agent_run_id")
-                if existing_agent_id and await self.registry.get(existing_agent_id):
+                existing_run = (
+                    await self.registry.get(existing_agent_id) if existing_agent_id else None
+                )
+                # Reuse ONLY a still-live worker. A finished/cancelled AgentRun can
+                # linger in the registry (1h TTL) while its DB run is still active —
+                # e.g. cancelled at the column-selection gate, where cancel() flips
+                # only in-memory state and never persists a terminal run status.
+                # Reusing it wedged the source for the whole TTL window; instead
+                # treat the DB run as abandoned and start fresh.
+                if existing_run is not None and not existing_run.is_finished:
                     logger.info(
                         "profiling.start.reused",
                         source_id=str(source_id),
@@ -174,7 +183,10 @@ class ProfilingService:
                 active = await ProfilingRepoPg(s).get_active(source_id)
                 if active:
                     existing_agent_id = (active.get("params") or {}).get("agent_run_id")
-                    if existing_agent_id and await self.registry.get(existing_agent_id):
+                    race_run = (
+                        await self.registry.get(existing_agent_id) if existing_agent_id else None
+                    )
+                    if race_run is not None and not race_run.is_finished:
                         return active["id"], existing_agent_id, True
                 # Race + no live worker — surface the conflict instead of
                 # silently starting a second pipeline.
@@ -364,6 +376,14 @@ class ProfilingService:
             logger.info("v2: maybe_finish on terminal run, skip", run_id=str(run_id_db), status=run["status"])
             return
         if counts.get("awaiting_input", 0) > 0:
+            # Persist run-level 'awaiting_input' so a backend restart doesn't
+            # abandon a run that's merely waiting on a human answer (it's excluded
+            # from ABANDON_ON_RESTART). The parked task carries its questions and
+            # is fully resumable once answered.
+            async with self.sm() as s:
+                await ProfilingRepoPg(s).set_status(run_id_db, "awaiting_input")
+                await s.commit()
+            await self._sync_status(source_id)
             logger.info("v2: parked on questions", run_id=str(run_id_db), n=counts["awaiting_input"])
             return
 
@@ -373,14 +393,23 @@ class ProfilingService:
         # writing notes/graph/synthesis for whatever DID complete.
         failed = counts.get("failed", 0)
         pending_left = counts.get("pending", 0) + counts.get("running", 0)
-        incomplete = failed > 0 or pending_left > 0 or not coverage.get("complete", False)
+        missing = coverage.get("missing") or []
+        incomplete = (
+            failed > 0 or pending_left > 0 or not coverage.get("complete", False)
+        )
         final_error: str | None = None
         if incomplete:
-            final_error = (
-                f"Профилирование завершено частично: failed={failed}, "
-                f"незавершённых задач={pending_left}, колонок без описания="
-                f"{len(coverage.get('missing') or [])}."
-            )
+            if failed == 0 and pending_left == 0 and not missing:
+                # coverage.complete is False with no concrete deficit → nothing was
+                # harvested at all (empty/inaccessible source). Avoid the old
+                # self-contradictory "failed=0, …=0, …=0" message.
+                final_error = "Профилирование не нашло ни одной колонки для индексации."
+            else:
+                final_error = (
+                    f"Профилирование завершено частично: failed={failed}, "
+                    f"незавершённых задач={pending_left}, колонок без описания="
+                    f"{len(missing)}."
+                )
 
         try:
             await self._write_notes(source_id)
@@ -434,7 +463,13 @@ class ProfilingService:
 
                 raise ValidationError("Этот запуск уже завершён — ответ не требуется")
             payload = dict(task.get("payload") or {})
-            payload["answers"] = answers
+            # Merge with earlier rounds' answers (the UI/API only send the current
+            # round's). Dedup by (column, text), current-round wins — otherwise a
+            # 2-round clarification loses round-1 context on the final re-run.
+            merged: dict[Any, Any] = {}
+            for a in (payload.get("answers") or []) + list(answers):
+                merged[(a.get("column"), a.get("text"))] = a
+            payload["answers"] = list(merged.values())
             await repo.set_status(task_id, "pending", payload=payload)
             await s.commit()
 
@@ -454,14 +489,32 @@ class ProfilingService:
                 agent_run.attach_task(asyncio.current_task())  # type: ignore[arg-type]
             glossary = await self._load_glossary(source_id)
             try:
+                # A parked run sits in 'awaiting_input' (so a restart can't abandon
+                # it); flip back to 'running' now that we're resuming, so a second
+                # restart mid-resume re-abandons correctly.
+                async with self.sm() as s:
+                    await ProfilingRepoPg(s).set_status(run_id_db, "running")
+                    await s.commit()
                 await continue_pass2(
                     Pass2Deps(self.sm, self.llm, self.prompts, glossary),
                     run_id=run_id_db, source_id=source_id,
                 )
                 await self._maybe_finish(source_id, run_id_db, agent_run)
+            except asyncio.CancelledError:
+                # Deliberate cancel: persist a terminal status (fresh session — the
+                # surrounding one may be aborted) so the run never wedges in
+                # 'running', then re-raise. Mirrors _run_pipeline_v2.
+                try:
+                    async with self.sm() as s:
+                        await ProfilingRepoPg(s).set_status(
+                            run_id_db, "cancelled", error="cancelled_by_user"
+                        )
+                        await s.commit()
+                except Exception:
+                    logger.exception("v2: continue cancel-persist failed", run_id=str(run_id_db))
+                raise
             except Exception as exc:  # noqa: BLE001
-                # Don't leave the run wedged in 'running' forever — mark it failed
-                # and resync, mirroring _continue_after_gate.
+                # Don't leave the run wedged in 'running' forever — mark it failed.
                 logger.exception("v2: continue failed", run_id=str(run_id_db))
                 try:
                     async with self.sm() as s:
@@ -469,11 +522,15 @@ class ProfilingService:
                             run_id_db, "failed", error=str(exc)
                         )
                         await s.commit()
-                    await self._sync_status(source_id)
                 except Exception:
                     logger.exception("v2: continue fail-persist failed", run_id=str(run_id_db))
                 if agent_run is not None and not agent_run.is_finished:
                     await agent_run.finalize(error=str(exc))
+            finally:
+                # Always reconcile denormalized status (runs on cancel too) and
+                # drop the per-run lock so the dict can't grow unbounded.
+                await self._sync_status(source_id)
+                self._resume_locks.pop(str(run_id_db), None)
 
     async def unpark_after_disable(
         self, table_id: UUID, disabled_names: list[str]
@@ -606,10 +663,19 @@ class ProfilingService:
             total = 0
             for item in disabled:
                 names = item.get("names") or []
-                if names:
-                    total += await repo.set_columns_enabled(
-                        UUID(str(item["table_id"])), names, False
+                if not names:
+                    continue
+                table_id = UUID(str(item["table_id"]))
+                # Scope the gate to THIS run's source: never let a crafted/stale
+                # table_id from the submission disable columns of another source.
+                tbl = await repo.get_table(table_id)
+                if not tbl or tbl["source_id"] != source_id:
+                    logger.warning(
+                        "v2: gate disable skipped — table not in run source",
+                        run_id=str(run_id_db), table_id=str(table_id),
                     )
+                    continue
+                total += await repo.set_columns_enabled(table_id, names, False)
             await s.commit()
 
         logger.info(
@@ -649,6 +715,20 @@ class ProfilingService:
                         step_completed("describe", int((time.time() - t1) * 1000))
                     )
                 await self._maybe_finish(source_id, run_id_db, agent_run)
+            except asyncio.CancelledError:
+                # Deliberate cancel mid pass-2: persist 'cancelled' (fresh session)
+                # so the run doesn't wedge in 'running', then re-raise. Without
+                # this the CancelledError propagates uncaught and the slot stays
+                # held until a restart. Mirrors _run_pipeline_v2.
+                try:
+                    async with self.sm() as s:
+                        await ProfilingRepoPg(s).set_status(
+                            run_id_db, "cancelled", error="cancelled_by_user"
+                        )
+                        await s.commit()
+                except Exception:
+                    logger.exception("v2: gate-resume cancel-persist failed", run_id=str(run_id_db))
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.exception("v2: continue_after_gate failed", run_id=str(run_id_db))
                 try:
@@ -659,9 +739,12 @@ class ProfilingService:
                         await s.commit()
                 except Exception:
                     logger.exception("v2: gate-resume fail persist failed")
-                await self._sync_status(source_id)
                 if agent_run is not None and not agent_run.is_finished:
                     await agent_run.finalize(error=str(exc))
+            finally:
+                # Reconcile status on every exit (incl. cancel) + evict the lock.
+                await self._sync_status(source_id)
+                self._resume_locks.pop(str(run_id_db), None)
 
     async def _load_glossary(self, source_id: UUID) -> str:
         """The source's human glossary text (capped), fed to profiling prompts as
@@ -709,8 +792,12 @@ class ProfilingService:
         describer over its harvested facts, then rebuild the table's RAG notes
         and resync the graph. Used to fill in a column that was excluded before
         pass 2 (facts but no description) when it's re-included."""
-        from t2r.agents.admin_profiling.describe import describe_columns
+        from t2r.agents.admin_profiling.describe import (
+            ColumnDescribeError,
+            describe_columns,
+        )
         from t2r.agents.admin_profiling.note_writer import rebuild_table_notes
+        from t2r.errors import UpstreamError
         from t2r.infra.graph.sync import try_resync_source_graph
 
         async with self.sm() as session:
@@ -733,13 +820,22 @@ class ProfilingService:
                 }
             if not col.get("enabled", True):
                 await semantic.set_column_enabled(column_id, True)
-            described = await describe_columns(
-                llm=self.llm,
-                prompts=self.prompts,
-                semantic=semantic,
-                table_id=table_id,
-                names=[col["name"]],
-            )
+            try:
+                described = await describe_columns(
+                    llm=self.llm,
+                    prompts=self.prompts,
+                    semantic=semantic,
+                    table_id=table_id,
+                    names=[col["name"]],
+                )
+            except ColumnDescribeError as exc:
+                # Nothing usable came back — don't rebuild notes/graph or commit
+                # the re-enable on a still-undescribed column (the session rolls
+                # back on raise). Surface a clear, retryable error.
+                raise UpstreamError(
+                    "Не удалось описать колонку — LLM вернул пустой ответ. "
+                    "Попробуйте ещё раз."
+                ) from exc
             # Rebuild this table's notes from the (now-described) enabled columns.
             full = next(
                 (t for t in await semantic.list_tables(source_id) if t["id"] == table_id),

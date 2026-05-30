@@ -46,3 +46,18 @@ def test_handles_non_list_and_non_dict_input():
     assert _sanitize_questions(None, {"a"}) == []
     assert _sanitize_questions("nope", {"a"}) == []
     assert _sanitize_questions([42, "x", None], {"a"}) == []
+
+
+def test_kakogo_tipa_only_drops_data_type_questions():
+    # "какого типа" is ordinary Russian ("what kind of") — a genuine business
+    # question must survive; only the data/storage-type variant is derivable.
+    kept = _sanitize_questions(
+        [{"column": "payment", "text": "Какого типа этот платёж — рекуррентный или разовый?"}],
+        {"payment"},
+    )
+    assert len(kept) == 1
+    dropped = _sanitize_questions(
+        [{"column": "blob", "text": "Какого типа данные хранятся в колонке?"}],
+        {"blob"},
+    )
+    assert dropped == []

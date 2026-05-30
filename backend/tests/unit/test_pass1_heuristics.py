@@ -55,6 +55,11 @@ def test_detect_pattern():
     assert detect_pattern(["[]", "[]"]) == "json_array"
     assert detect_pattern(["{1,1,1}", "{}", "{1}"]) == "braced_list"
     assert detect_pattern(["a,b,c", "d,e"]) == "delimited_list"
+    # truncation-tolerant: the richest example is captured + truncated (~300), so a
+    # large JSON/array blob is cut mid-string and no longer closes — a long opener
+    # must still be recognised (else the format hint is lost for big blobs).
+    assert detect_pattern(['{"a":1,"b":2,"c":' + "3" * 300]) == "json_object"
+    assert detect_pattern(["[" + "1," * 200]) == "json_array"
     assert detect_pattern(["123", "456"]) == "numeric_string"
     assert detect_pattern(["hello", "world"]) is None
     # multi-word free text must NOT be mistaken for a delimited list

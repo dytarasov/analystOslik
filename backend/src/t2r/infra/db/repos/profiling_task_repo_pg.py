@@ -125,6 +125,11 @@ class ProfilingTaskRepo:
         A task is runnable when it's ``pending`` and every dependency is in a
         terminal-success state. ``FOR UPDATE SKIP LOCKED`` lets multiple workers
         pull different tasks concurrently without stepping on each other.
+
+        ``attempts`` is NOT bumped here — it counts genuine transient failures
+        (bumped only on the failure-retry path), so it isn't eroded by benign
+        re-claims (question rounds, restarts) that would otherwise exhaust the
+        retry budget before the task ever truly failed.
         """
         row = (
             await self.session.execute(
@@ -142,7 +147,7 @@ class ProfilingTaskRepo:
                     "  LIMIT 1"
                     ")"
                     " UPDATE profiling_tasks p"
-                    " SET status = 'running', attempts = p.attempts + 1,"
+                    " SET status = 'running',"
                     "     started_at = now(), updated_at = now()"
                     " FROM ready WHERE p.id = ready.id"
                     f" RETURNING {', '.join('p.' + c.strip() for c in _COLS.split(','))}"
@@ -160,6 +165,7 @@ class ProfilingTaskRepo:
         result: dict[str, Any] | None = None,
         error: str | None = None,
         payload: dict[str, Any] | None = None,
+        bump_attempts: bool = False,
     ) -> None:
         await self.session.execute(
             text(
@@ -167,6 +173,7 @@ class ProfilingTaskRepo:
                 "  result = COALESCE(CAST(:result AS jsonb), result),"
                 "  payload = COALESCE(CAST(:payload AS jsonb), payload),"
                 "  error = :err,"
+                "  attempts = attempts + CASE WHEN :bump THEN 1 ELSE 0 END,"
                 "  finished_at = CASE WHEN :terminal THEN now() ELSE finished_at END,"
                 "  updated_at = now()"
                 " WHERE id = :id"
@@ -177,6 +184,7 @@ class ProfilingTaskRepo:
                 "result": json.dumps(result) if result is not None else None,
                 "payload": json.dumps(payload) if payload is not None else None,
                 "err": error,
+                "bump": bump_attempts,
                 "terminal": status in ("done", "failed", "skipped"),
             },
         )
@@ -249,6 +257,11 @@ class ProfilingTaskRepo:
             for c in cols or []:
                 expected.add((h["database"], h["table_name"], str(c)))
 
+        # Whether ANY column was harvested at all (before the disable subtraction).
+        # Distinguishes a legitimately all-disabled run (complete) from an empty /
+        # inaccessible source that harvested nothing (must stay incomplete).
+        harvested_any = len(expected) > 0
+
         # Columns the admin disabled are intentionally excluded from describe_group,
         # so they are never "covered". They stay harvested in pass-1 (the catalog
         # must remain complete for cheap re-enable), so without subtracting them
@@ -290,5 +303,8 @@ class ProfilingTaskRepo:
             "missing": [
                 {"database": d, "table": t, "column": col} for (d, t, col) in missing
             ],
-            "complete": len(missing) == 0 and len(expected) > 0,
+            # Complete = every still-expected column is covered AND something was
+            # actually harvested. All-disabled (expected emptied above) is complete;
+            # a no-harvest run is not.
+            "complete": len(missing) == 0 and harvested_any,
         }

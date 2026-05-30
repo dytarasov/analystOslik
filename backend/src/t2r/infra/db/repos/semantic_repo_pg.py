@@ -125,7 +125,12 @@ class SemanticRepoPg:
                     "     null_ratio = EXCLUDED.null_ratio,"
                     "     distinct_count = EXCLUDED.distinct_count,"
                     "     total_count = EXCLUDED.total_count,"
-                    "     examples = EXCLUDED.examples,"
+                    # Preserve-on-null, like value_catalog/value_range below: a
+                    # transient example-harvest chunk failure passes examples=None
+                    # for the whole chunk, and a bare EXCLUDED.examples would wipe
+                    # the previously-stored examples on a re-profile. COALESCE keeps
+                    # the prior values when the new harvest has none.
+                    "     examples = COALESCE(EXCLUDED.examples, sem_columns.examples),"
                     "     is_in_sorting_key = EXCLUDED.is_in_sorting_key,"
                     "     is_in_partition_key = EXCLUDED.is_in_partition_key,"
                     "     is_in_primary_key = EXCLUDED.is_in_primary_key,"

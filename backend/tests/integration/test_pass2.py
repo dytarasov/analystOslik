@@ -174,3 +174,26 @@ async def test_describe_group_question_then_finalize(ctx) -> None:
     assert status_col["description"] == "Статус учителя"
     assert status_col["semantics"]["value_meanings"]["trial"] == "пробный"
     assert status_col["semantics"]["confidence"] == 0.92
+
+
+@pytest.mark.asyncio
+async def test_describe_group_empty_output_fails_not_done(ctx) -> None:
+    """Coverage guard: an empty/unparseable describer reply must NOT finalize the
+    task 'done' (which would let coverage count the NULL-description column as
+    covered — silent column loss). It fails so the scheduler retries / the run is
+    honestly reported incomplete."""
+    sm, rid, sid, tid = ctx
+    # No questions, no columns — the prior silent-loss path.
+    llm = FakeLLM([json.dumps({"columns": [], "questions": []})])
+    deps = Pass2Deps(sessionmaker=sm, llm=llm, prompts=PromptLoader())
+    task = {
+        "database": "db", "table_name": "t",
+        "columns": ["status"], "payload": {"mode": "columns"},
+    }
+    res = await _describe_group_task(deps, sid, task)
+    assert res.status == "failed"
+
+    async with sm() as s:
+        cols = await SemanticRepoPg(s).get_columns(tid)
+    status_col = next(c for c in cols if c["name"] == "status")
+    assert status_col["description"] is None  # nothing was written

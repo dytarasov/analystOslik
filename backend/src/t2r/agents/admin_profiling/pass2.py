@@ -35,7 +35,8 @@ MAX_QUESTION_ROUNDS = 2
 # dropped — the describer must infer these from the facts block, never ask.
 _DERIVABLE_Q_RX = re.compile(
     r"в\s+каком\s+формате|какой\s+формат|формат\s+(хранени|строк|значени)"
-    r"|тип\s+(данны|колонк)|реальн\w*\s+тип|какого\s+типа"
+    r"|тип\s+(данны|колонк)|реальн\w*\s+тип"
+    r"|какого\s+типа\s+(данны|значени|колонк|поле|столбц)"
     r"|внутренн\w*\s+структур|структур\w*\s+строк"
     r"|через\s+запят|(json|csv)\b.{0,12}(или|через)"
     r"|пример\w*\s+значени|сколько\s+уникальн|долю?\s+null",
@@ -301,6 +302,27 @@ async def _describe_group_task(
                 semantics=semantics or None,
             )
         await session.commit()
+
+        # Coverage guard: only finalize 'done' once every enabled, non-locked
+        # target column actually has a description. On an empty / partial /
+        # unparseable LLM reply the apply loop writes nothing (or only some);
+        # returning 'done' would let coverage() count those as covered while
+        # shipping NULL descriptions to RAG/graph — silent column loss. Fail so
+        # the scheduler retries (and, if the budget is spent, the run is honestly
+        # reported incomplete with these columns listed).
+        fresh = {c["name"]: c for c in await semantic.get_columns(table_id, only_enabled=True)}
+        undescribed = [
+            n
+            for n in group_cols
+            if n in fresh
+            and not fresh[n].get("locked")
+            and not str(fresh[n].get("description") or "").strip()
+        ]
+        if undescribed:
+            return TaskResult(
+                "failed",
+                error="describer returned no description for: " + ", ".join(undescribed),
+            )
     return TaskResult("done", result={"described": len(described)})
 
 

@@ -117,9 +117,12 @@ class TaskScheduler:
             res = TaskResult("failed", error=str(exc))
 
         if res.status == "failed" and task["attempts"] < self.max_attempts:
-            # Transient — put it back for another attempt.
+            # Transient — put it back for another attempt, bumping the genuine
+            # transient-failure counter (claim_next no longer touches attempts).
             async with self.sm() as session:
-                await ProfilingTaskRepo(session).set_status(task_id, "pending", error=res.error)
+                await ProfilingTaskRepo(session).set_status(
+                    task_id, "pending", error=res.error, bump_attempts=True
+                )
                 await session.commit()
             logger.warning(
                 "scheduler.task: retry",
