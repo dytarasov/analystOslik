@@ -103,26 +103,58 @@
 
 | Слой | Технологии |
 |---|---|
-| Backend язык | Python 3.12, asyncio |
-| Web | FastAPI, sse-starlette, slowapi |
-| DI | Dishka (App / Request scopes) |
-| ORM/DB | SQLAlchemy 2.x (async) + asyncpg, pgvector |
-| Graph | Neo4j 5 (async driver) |
-| ClickHouse | clickhouse-connect (HTTP, async через aiohttp) |
-| LLM | AsyncOpenAI (OpenAI-совместимые провайдеры) |
-| SQL safety | sqlglot |
-| Export | openpyxl |
-| Security | cryptography (Fernet), bcrypt, pyjwt |
-| Logging | structlog с request_id |
+| Backend язык | Python 3.12 (asyncio) |
+| Web | FastAPI + Uvicorn, sse-starlette (SSE), slowapi (rate limit) |
+| DI | Dishka — App-scope (клиенты LLM/эмбеддингов/Neo4j, sessionmaker) + Request-scope (репозитории/сервисы) |
+| БД-доступ | SQLAlchemy 2.x (async) + asyncpg, pgvector |
+| Graph | Neo4j 5 async-драйвер (bolt) |
+| ClickHouse | clickhouse-connect (HTTP, async) — **только чтение** источника |
+| LLM | openai SDK (`AsyncOpenAI`) — любой OpenAI-совместимый провайдер |
+| Эмбеддинги | bge-m3 → `vector(1024)`, через OpenAI-совместимый эндпоинт |
+| SQL safety | sqlglot (guard: парсинг + переписывание) |
+| Export | openpyxl (XLSX) |
+| Security | cryptography (Fernet — пароли источников), bcrypt (пароль админа), pyjwt (cookie-сессия) |
+| Logging | structlog (JSON в prod) + `request_id` middleware |
 | Frontend язык | TypeScript |
 | Framework | Next.js 14 (App Router), React 18 |
-| UI | Tailwind CSS (тёплая палитра), shadcn-style компоненты |
-| State | Zustand, react-hook-form, sonner |
-| Графы | Cytoscape.js (fcose, cose-bilkent, dagre) |
+| UI | Tailwind CSS (тёплая палитра), Radix UI primitives (shadcn-style), lucide-react, sonner (toasts) |
+| Формы/состояние | Zustand, react-hook-form + zod |
+| Markdown/SQL | react-markdown + remark-gfm; SQL-редактор: react-simple-code-editor + prismjs + sql-formatter |
 | Тесты бэка | pytest + pytest-asyncio + testcontainers (Postgres) |
 | Тесты фронта | Vitest + @testing-library/react + jsdom |
-| Контейнеризация | Docker + Docker Compose v2 |
-| Хранилища | Postgres 16 + pgvector, Neo4j 5.20, ClickHouse 24.8 |
+| Хранилища | PostgreSQL 16 + pgvector, Neo4j 5.20 (+ APOC), ClickHouse 24.8 |
+| Контейнеризация | Docker + Docker Compose v2 (dev + prod), nginx reverse-proxy, Let's Encrypt TLS |
+
+### Модель и LLM-провайдер
+
+**Провайдер-агностично.** Бэкенд работает с любым OpenAI-совместимым API (DeepSeek, GLM, OpenRouter, локальные сервы) — модель задаётся переменными `T2R_LLM_*`, генеративная и эмбеддинг-модель раздельные. Дефолт стека — DeepSeek (генерация) + bge-m3 (эмбеддинги, 1024-мерные).
+
+- **Параметры генерации** (`settings.py`): `temperature=0.2` (фактологичность), `max_tokens=4096`; для структурного ингеста глоссария — `8192` (длинный JSON-ответ иначе обрезался).
+- **Устойчивость к зависшему апстриму**: `llm_request_timeout=60s` × `llm_max_retries=1` (вместо дефолтных 600s×2 у SDK) — один вызов ограничен ~2 минутами, UI не висит в спиннере.
+- **OpenRouter pinning**: `T2R_LLM_OPENROUTER_PROVIDER` фиксирует один апстрим (например, чтобы не прыгать между провайдерами по латентности).
+- **Эмбеддинги**: вход усекается до 16000 символов (контекст bge-m3 — 8192 токена; широкая заметка о таблице иначе крашила эмбеддер). Хранится полный текст заметки, режется только вход вектора. Поиск — косинус по pgvector (`<=>`).
+- **Парсинг ответов LLM** терпим к «грязному» выводу слабых моделей (`extract_json` + фоллбэки) — кривой JSON в tool-call не валит ход агента.
+
+### Инфраструктура — как всё крутится
+
+**Контейнеры (Docker Compose).** Пять сервисов: `postgres` (pgvector), `neo4j` (+APOC), `clickhouse`, `backend` (uvicorn), `frontend` (Next.js). В проде добавляется `nginx`. Dev (`docker-compose.yml`) пробрасывает порты наружу; prod (`docker-compose.prod.yml`) прячет всё за nginx и имеет собственные volume'ы (не пересекаются с dev). Демо-данные грузятся отдельным профилем `--profile seed` (контейнер `ch-seeder`).
+
+**Single-domain reverse-proxy.** nginx отдаёт фронт и проксирует `/api/*` в бэкенд на **одном домене** (`analyticaloslik.com`) → cookie остаются first-party, CORS не нужен. Для SSE отключены буферизация и кэш, `read_timeout=3600s` (долгие стримы профилирования/агента не рвутся). `client_max_body_size 25m` под выгрузки.
+
+**TLS и сеть.** Сертификат Let's Encrypt выпускается на хосте (`certbot --standalone`) и монтируется в nginx read-only; HTTP→HTTPS редирект + HSTS в проде. Cloudflare в режиме **DNS-only** (серое облако) — клиенты ходят прямо на origin:443. Прод-окружение — EC2 `t3.large`. Бэкенд доверяет `X-Forwarded-*` только от nginx (`--proxy-headers --forwarded-allow-ips=*`).
+
+**Запуск и обновление.** Миграции применяются **автоматически на старте** (`apply_pending` в lifespan). При старте же отрабатывают **recovery-хуки**: осиротевшие после рестарта `profiling_runs` и `task_runs` корректно закрываются (а не висят вечно в `running`, блокируя новые старты). Деплой — `git pull main` + `docker compose -f docker/docker-compose.prod.yml up -d --build` (детали в [DEPLOY.md](DEPLOY.md) и [DEPLOY_RUNBOOK.md](DEPLOY_RUNBOOK.md)).
+
+### Ключевые инженерные решения
+
+- **Три слоя знаний, один источник правды.** PostgreSQL (`sem_*`) — истина; pgvector `md_notes` (RAG по смыслу) и Neo4j (граф связей) — производные, идемпотентно пересобираемые из PG (коммит в PG идёт **до** синка графа, чтобы граф никогда не опережал откатываемую транзакцию).
+- **Durable-очередь профилирования.** Задачи живут в Postgres (`profiling_tasks`), забираются атомарно (`FOR UPDATE SKIP LOCKED`) с учётом зависимостей. Прогон **возобновляем**, переживает рестарт backend, а coverage-инвариант гарантирует, что **ни одна колонка не потеряется** (нет описания → ретрай, а не «тихо пропустить»).
+- **Идемпотентные старты.** Один активный прогон на источник / одна активная задача на сессию — через partial unique index; двойной сабмит или SSE-реконнект **переиспользуют** живой `AgentRun`, а не плодят дубли.
+- **SSE с реплеем.** Монотонный `id` события + заголовок `Last-Event-ID` → при F5/обрыве сервер досылает пропущенное из replay-буфера; профилирование при уходе со страницы **не прерывается**.
+- **SQL guard между агентом и базой.** sqlglot-валидация: только чтение, whitelist таблиц **и колонок**, запрет внешних IO-функций (`url/s3/file/remote/...`) и DDL/DML, авто-`max_execution_time`. Агент физически не может это обойти — guard зашит внутрь `run_sql`.
+- **Персистентный thread агента.** Полный OpenAI-диалог (`tool_calls` + наблюдения) хранится в `agent_messages` и реиграется на каждом ходу; обрезка по границам ходов + бюджет символов держат контекст под лимитом → follow-up продолжает контекст, а не исследует заново.
+- **Защита ручной работы.** Флаги `locked`/`enabled`: отредактированные/подтверждённые описания и выбор колонок **переживают ре-профайл** (структурные факты обновляются, контент — нет).
+- **Безопасность по умолчанию.** Пароли источников шифруются Fernet, пароль админа — bcrypt, клиентская часть за UUID-`access_key`-гейтом, rate-limit на логин/доступ/задачи, security-заголовки (`nosniff`/`DENY`/HSTS), structlog с `request_id` для трассировки.
 
 ---
 
