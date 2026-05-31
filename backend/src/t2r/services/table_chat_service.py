@@ -157,16 +157,6 @@ async def _apply_actions(
         try:
             if op == "set_table":
                 fields = action.get("fields") or {}
-                await repo.add_revision(
-                    entity_kind="sem_table",
-                    entity_id=table["id"],
-                    payload={
-                        k: table.get(k)
-                        for k in ("title", "description", "domain", "tags")
-                    },
-                    actor=actor,
-                    reason="table_chat",
-                )
                 await repo.update_table(
                     table["id"],
                     title=fields.get("title"),
@@ -183,19 +173,6 @@ async def _apply_actions(
                 if not col_id:
                     continue
                 fields = action.get("fields") or {}
-                # Snapshot previous values before mutating.
-                prev = await repo.get_column(col_id)
-                if prev:
-                    await repo.add_revision(
-                        entity_kind="sem_column",
-                        entity_id=col_id,
-                        payload={
-                            k: prev.get(k)
-                            for k in ("description", "semantic_role", "user_notes")
-                        },
-                        actor=actor,
-                        reason="table_chat",
-                    )
                 await repo.update_column(
                     col_id,
                     description=fields.get("description"),

@@ -414,38 +414,6 @@ export const api = {
     eventsUrl: (agent_run_id: string) =>
       `${API_URL}/api/admin/tables/agent-runs/${agent_run_id}/events`,
   },
-  tableRevisions: (table_id: string) =>
-    request<
-      Array<{
-        id: string;
-        revision: number;
-        payload: Record<string, unknown>;
-        actor: string | null;
-        reason: string | null;
-        created_at: string;
-      }>
-    >(`/api/admin/tables/${table_id}/revisions`),
-  restoreTableRevision: (table_id: string, revision: number) =>
-    request<SemTable>(
-      `/api/admin/tables/${table_id}/revisions/${revision}/restore`,
-      { method: "POST" },
-    ),
-  columnRevisions: (column_id: string) =>
-    request<
-      Array<{
-        id: string;
-        revision: number;
-        payload: Record<string, unknown>;
-        actor: string | null;
-        reason: string | null;
-        created_at: string;
-      }>
-    >(`/api/admin/columns/${column_id}/revisions`),
-  restoreColumnRevision: (column_id: string, revision: number) =>
-    request<SemColumn>(
-      `/api/admin/columns/${column_id}/revisions/${revision}/restore`,
-      { method: "POST" },
-    ),
   client: {
     listPublicSources: () =>
       request<Array<{ id: string; name: string; database: string; readonly_verified: boolean }>>(
@@ -496,6 +464,7 @@ export const api = {
       request<
         | {
             ok: true;
+            cell_id: string;
             sql: string;
             preview: { columns: string[]; rows: unknown[][] };
             rowcount: number;
@@ -507,6 +476,8 @@ export const api = {
         body: JSON.stringify({ sql }),
       }),
     exportUrl: (task_id: string) => `${API_URL}/api/tasks/${task_id}/export.xlsx`,
+    cellExportUrl: (task_id: string, cell_id: string) =>
+      `${API_URL}/api/tasks/${task_id}/cells/${cell_id}/export.xlsx`,
   },
   audit: {
     list: (params?: { entity_kind?: string; entity_id?: string; limit?: number }) => {

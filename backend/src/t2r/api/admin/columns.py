@@ -95,22 +95,3 @@ async def regenerate_column(
         column_id, actor=login, guidance=payload.guidance
     )
     return {"agent_run_id": run_id}
-
-
-@router.get("/columns/{column_id}/revisions")
-@inject
-async def list_column_revisions(
-    column_id: UUID, svc: FromDishka[SemanticService]
-) -> list[dict]:
-    return await svc.list_column_revisions(column_id)
-
-
-@router.post("/columns/{column_id}/revisions/{revision}/restore")
-@inject
-async def restore_column_revision(
-    column_id: UUID,
-    revision: int,
-    svc: FromDishka[SemanticService],
-    login: str = AdminDep,
-) -> dict:
-    return await svc.restore_column_revision(column_id, revision, login)

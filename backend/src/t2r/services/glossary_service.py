@@ -266,21 +266,6 @@ class GlossaryService:
             examples = [str(e) for e in examples] if isinstance(examples, list) else None
             description = (c.get("description") or "").strip() or None
 
-            # Snapshot the prior column state before clobbering its description,
-            # so a hand-edited (or earlier) value stays recoverable via revisions.
-            prev = await self.semantic_repo.get_column(column_id)
-            if prev and description and (prev.get("description") or "") != description:
-                await self.semantic_repo.add_revision(
-                    entity_kind="sem_column",
-                    entity_id=column_id,
-                    payload={
-                        k: prev.get(k)
-                        for k in ("description", "semantic_role", "user_notes")
-                    },
-                    actor="glossary",
-                    reason="glossary ingest",
-                )
-
             await self.semantic_repo.apply_glossary_column(
                 column_id,
                 description=description,

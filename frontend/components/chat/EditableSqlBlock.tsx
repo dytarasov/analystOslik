@@ -12,7 +12,8 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { api, HttpError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-type RerunResult = {
+export type RerunResult = {
+  cellId: string;
   sql: string;
   preview: { columns: string[]; rows: unknown[][] };
   rowcount: number;
@@ -86,13 +87,16 @@ export function EditableSqlBlock({
     try {
       const res = await api.client.rerunSql(taskId, draft.trim());
       if (res.ok) {
+        // Jupyter-style: the run's output becomes a NEW cell below — we leave the
+        // editor's text exactly as the user typed it (the executed/normalised SQL
+        // is shown in the new cell's own block) so this source stays editable.
         onRerunSuccess?.({
+          cellId: res.cell_id,
           sql: res.sql,
           preview: res.preview,
           rowcount: res.rowcount,
           exportUrl: res.export_url,
         });
-        setDraft(prettySql(res.sql)); // normalised by sql_guard (LIMIT/SETTINGS injected)
       } else {
         setError(res.error);
         setErrKind(res.kind);
@@ -160,7 +164,7 @@ export function EditableSqlBlock({
         )}
         {isDirty && (
           <span className="ml-auto shrink-0 rounded-sm bg-warning/15 px-1.5 py-0.5 font-mono text-[10px] text-warning">
-            не сохранено
+            изменён
           </span>
         )}
       </button>

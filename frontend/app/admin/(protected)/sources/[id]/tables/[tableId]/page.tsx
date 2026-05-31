@@ -18,16 +18,7 @@ import { useTask } from "@/hooks/useTask";
 import { api, HttpError, type SemColumn, type SemTable } from "@/lib/api";
 import { API_URL } from "@/lib/env";
 
-type Tab = "overview" | "chat" | "history";
-
-type Revision = {
-  id: string;
-  revision: number;
-  payload: Record<string, unknown>;
-  actor: string | null;
-  reason: string | null;
-  created_at: string;
-};
+type Tab = "overview" | "chat";
 
 export default function TableEditorPage() {
   const params = useParams<{ id: string; tableId: string }>();
@@ -39,7 +30,6 @@ export default function TableEditorPage() {
   const [tags, setTags] = useState("");
   const [userNotes, setUserNotes] = useState("");
   const [saving, setSaving] = useState(false);
-  const [revisions, setRevisions] = useState<Revision[]>([]);
   const task = useTask();
 
   function applyTable(t: SemTable) {
@@ -60,22 +50,10 @@ export default function TableEditorPage() {
       );
   }
 
-  function loadRevisions() {
-    return api
-      .tableRevisions(params.tableId)
-      .then((r) => setRevisions(r as Revision[]))
-      .catch(() => undefined);
-  }
-
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.tableId]);
-
-  useEffect(() => {
-    if (tab === "history") loadRevisions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, params.tableId]);
 
   useEffect(() => {
     if (task.state === "done") load();
@@ -110,23 +88,6 @@ export default function TableEditorPage() {
         userNotes || null,
       );
       task.start(`${API_URL}/api/admin/edit/agent-runs/${agent_run_id}/events`);
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
-    }
-  }
-
-  async function onRestoreRevision(revision: number) {
-    if (
-      !confirm(
-        `Восстановить ревизию #${revision}? Текущее состояние сохранится как новая ревизия.`,
-      )
-    )
-      return;
-    try {
-      const updated = await api.restoreTableRevision(params.tableId, revision);
-      applyTable(updated);
-      await loadRevisions();
-      toast.success(`Восстановлена ревизия #${revision}`);
     } catch (err) {
       toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
     }
@@ -188,9 +149,6 @@ export default function TableEditorPage() {
         </TabButton>
         <TabButton active={tab === "chat"} onClick={() => setTab("chat")}>
           Диалог с агентом
-        </TabButton>
-        <TabButton active={tab === "history"} onClick={() => setTab("history")}>
-          История ревизий
         </TabButton>
       </div>
 
@@ -269,10 +227,6 @@ export default function TableEditorPage() {
       {tab === "chat" && (
         <TableChat tableId={params.tableId} onAfterApply={load} />
       )}
-
-      {tab === "history" && (
-        <RevisionsList revisions={revisions} onRestore={onRestoreRevision} />
-      )}
     </div>
   );
 }
@@ -302,49 +256,3 @@ function TabButton({
   );
 }
 
-function RevisionsList({
-  revisions,
-  onRestore,
-}: {
-  revisions: Revision[];
-  onRestore: (revision: number) => void;
-}) {
-  if (revisions.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        История пуста — ни одного изменения после первичного описания.
-      </p>
-    );
-  }
-  return (
-    <div className="space-y-2">
-      {revisions.map((r) => (
-        <Card key={r.id}>
-          <CardHeader className="flex flex-row items-start justify-between gap-2 pb-2">
-            <CardTitle className="text-sm">
-              Ревизия #{r.revision}{" "}
-              <span className="ml-2 text-xs font-normal text-muted-foreground">
-                {new Date(r.created_at).toLocaleString("ru-RU")}
-                {r.actor && ` · ${r.actor}`}
-                {r.reason && ` · ${r.reason}`}
-              </span>
-            </CardTitle>
-            <Tooltip label="Откатить таблицу к этому состоянию (текущее сохранится как новая ревизия)">
-              <Button size="sm" variant="outline" onClick={() => onRestore(r.revision)}>
-                Восстановить
-              </Button>
-            </Tooltip>
-          </CardHeader>
-          <CardContent>
-            <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted p-2 text-xs">
-              {JSON.stringify(r.payload, null, 2)}
-            </pre>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Снимок состояния ДО изменения.
-            </p>
-          </CardContent>
-        </Card>
-      ))}
-    </div>
-  );
-}

@@ -106,13 +106,6 @@ class _RegenerateStep(Step):
             except Exception:
                 new = {"description": out[:500]}
 
-            await semantic.add_revision(
-                entity_kind="sem_table",
-                entity_id=self.table_id,
-                payload={k: table.get(k) for k in ("title", "description", "domain", "tags")},
-                actor=self.actor,
-                reason="regenerate",
-            )
             await semantic.update_table(
                 self.table_id,
                 title=new.get("title"),
@@ -269,16 +262,6 @@ class _RegenerateColumnStep(Step):
             except Exception:
                 new = {"description": out[:500]}
 
-            await semantic.add_revision(
-                entity_kind="sem_column",
-                entity_id=self.column_id,
-                payload={
-                    k: column.get(k)
-                    for k in ("description", "semantic_role", "user_notes")
-                },
-                actor=self.actor,
-                reason="regenerate_column",
-            )
             await semantic.update_column(
                 self.column_id,
                 description=new.get("description"),

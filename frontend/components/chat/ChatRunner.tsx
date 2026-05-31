@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import { AgentStatusTimeline } from "@/components/chat/AgentStatusTimeline";
 import { ChatComposer } from "@/components/chat/ChatComposer";
-import { EditableSqlBlock } from "@/components/chat/EditableSqlBlock";
+import { EditableSqlBlock, type RerunResult } from "@/components/chat/EditableSqlBlock";
 import { Markdown } from "@/components/chat/Markdown";
 import { SourcePicker } from "@/components/chat/SourcePicker";
 import { DonkeyMark } from "@/components/shared/DonkeyMark";
@@ -34,6 +34,14 @@ export type ActiveTask = {
   live: boolean;
 } | null;
 
+type RerunCell = {
+  id: string;
+  sql: string;
+  preview: PreviewShape;
+  rowcount: number;
+  exportHref: string | null;
+};
+
 type Turn = {
   id: string;
   userText: string;
@@ -42,7 +50,9 @@ type Turn = {
   finalSteps?: import("@/hooks/useTask").StepInfo[];
   finalResult?: import("@/hooks/useTask").TaskFinalResult | null;
   finalError?: string | null;
-  overrideResult?: import("@/hooks/useTask").TaskFinalResult | null;
+  // Jupyter-style rerun results. Each "Запустить" appends a cell here; the
+  // original answer/table above is never mutated.
+  cells?: RerunCell[];
   clarifications?: { question: string; answer: string }[];
   // Восстановленный turn после перезагрузки страницы — нет live SSE, только то
   // что лежит в БД. abandoned=true для тех, кого убил рестарт сервиса.
@@ -275,18 +285,57 @@ export function ChatRunner({
     }
   }
 
+  // Append a Jupyter-style result cell to a turn (a "Запустить" produced new rows).
+  const appendCell = useCallback(
+    (turnId: string, taskId: string, r: RerunResult) => {
+      setTurns((prev) =>
+        prev.map((x) =>
+          x.id === turnId
+            ? {
+                ...x,
+                cells: [
+                  ...(x.cells || []),
+                  {
+                    id: r.cellId,
+                    sql: r.sql,
+                    preview: r.preview,
+                    rowcount: r.rowcount,
+                    exportHref: r.exportUrl
+                      ? api.client.cellExportUrl(taskId, r.cellId)
+                      : null,
+                  },
+                ],
+              }
+            : x,
+        ),
+      );
+      stickRef.current = true; // follow the new cell into view
+    },
+    [],
+  );
+
+  const removeCell = useCallback((turnId: string, cellId: string) => {
+    setTurns((prev) =>
+      prev.map((x) =>
+        x.id === turnId
+          ? { ...x, cells: (x.cells || []).filter((c) => c.id !== cellId) }
+          : x,
+      ),
+    );
+  }, []);
+
   function renderTurn(t: Turn, isLast: boolean) {
     const live =
       isLast &&
       !t.restored &&
       (isRunning || task.state === "done" || task.state === "error");
     const steps = live ? task.steps : t.finalSteps || [];
-    // The agent's prose answer is fixed once produced. Re-running the SQL only
-    // refreshes the DATA (table/sql/export) via overrideResult — it must never
-    // clobber the answer bubble. So keep the two separate.
+    // The agent's answer + its table are fixed once produced. Re-running the SQL
+    // never touches them — each run appends a fresh result cell below (Jupyter
+    // style), held in t.cells.
     const baseResult = live ? task.result : t.finalResult || null;
     const answer = baseResult?.summary;
-    const data = t.overrideResult ?? baseResult;
+    const data = baseResult;
     const error = live ? task.errorMsg : t.finalError;
     const preview: PreviewShape | null = hasPreview(data?.preview) ? data.preview : null;
 
@@ -367,26 +416,24 @@ export function ChatRunner({
                 sql={data.sql}
                 taskId={t.taskId}
                 sourceName={currentSource?.name}
-                onRerunSuccess={(r) => {
-                  setTurns((prev) =>
-                    prev.map((x) =>
-                      x.id === t.id
-                        ? {
-                            ...x,
-                            // Only the data is replaced; `answer` stays bound to
-                            // baseResult.summary so the prose bubble is untouched.
-                            overrideResult: {
-                              summary: x.finalResult?.summary ?? null,
-                              sql: r.sql,
-                              preview: r.preview,
-                              exportUrl: r.exportUrl,
-                            },
-                          }
-                        : x,
-                    ),
-                  );
-                }}
+                onRerunSuccess={(r) => appendCell(t.id, t.taskId!, r)}
               />
+            )}
+
+            {/* Jupyter-style: each rerun appends a result cell below; the
+                original answer + table above never change. */}
+            {(t.cells || []).map((cell, idx) =>
+              t.taskId ? (
+                <SqlCell
+                  key={cell.id}
+                  index={idx + 1}
+                  cell={cell}
+                  taskId={t.taskId}
+                  sourceName={currentSource?.name}
+                  onRun={(r) => appendCell(t.id, t.taskId!, r)}
+                  onRemove={() => removeCell(t.id, cell.id)}
+                />
+              ) : null,
             )}
           </div>
         )}
@@ -474,6 +521,52 @@ export function ChatRunner({
           }
         />
       </div>
+    </div>
+  );
+}
+
+// One Jupyter-style rerun result: a framed, dashed block carrying the run's
+// number, its table, and its own editable SQL (running it appends yet another
+// cell). The original answer above is never touched.
+function SqlCell({
+  index,
+  cell,
+  taskId,
+  sourceName,
+  onRun,
+  onRemove,
+}: {
+  index: number;
+  cell: RerunCell;
+  taskId: string;
+  sourceName?: string | null;
+  onRun: (r: RerunResult) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="animate-fade-in-up space-y-2 rounded-md border border-dashed border-primary/25 bg-primary/[0.02] p-2.5">
+      <div className="flex items-center gap-2">
+        <span className="label-mono text-primary/70">запуск [{index}]</span>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="ml-auto rounded-sm px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          убрать
+        </button>
+      </div>
+      <TablePreview
+        columns={cell.preview.columns}
+        rows={cell.preview.rows}
+        totalRows={cell.rowcount}
+        exportHref={cell.exportHref}
+      />
+      <EditableSqlBlock
+        sql={cell.sql}
+        taskId={taskId}
+        sourceName={sourceName}
+        onRerunSuccess={onRun}
+      />
     </div>
   );
 }

@@ -5,7 +5,6 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -596,22 +595,6 @@ class SemanticRepoPg:
             {"id": column_id, "a": actor},
         )
 
-    async def list_revisions(
-        self, *, entity_kind: str, entity_id: UUID, limit: int = 50
-    ) -> list[dict[str, Any]]:
-        rows = (
-            await self.session.execute(
-                text(
-                    "SELECT id, revision, payload, actor, reason, created_at"
-                    " FROM sem_revisions"
-                    " WHERE entity_kind = :ek AND entity_id = :eid"
-                    " ORDER BY revision DESC LIMIT :lim"
-                ),
-                {"ek": entity_kind, "eid": entity_id, "lim": limit},
-            )
-        ).mappings().all()
-        return [dict(r) for r in rows]
-
     async def confirm_table(self, table_id: UUID, actor: str) -> None:
         await self.session.execute(
             text(
@@ -621,57 +604,3 @@ class SemanticRepoPg:
             {"id": table_id, "a": actor},
         )
 
-    async def add_revision(
-        self,
-        *,
-        entity_kind: str,
-        entity_id: UUID,
-        payload: dict,
-        actor: str | None,
-        reason: str | None,
-    ) -> None:
-        params = {
-            "ek": entity_kind,
-            "eid": entity_id,
-            "p": json.dumps(payload, default=str),
-            "a": actor,
-            "r": reason,
-        }
-        # MAX(revision)+1 can race (concurrent edit + background regenerate); the
-        # UNIQUE(entity_kind, entity_id, revision) constraint turns a collision
-        # into an IntegrityError, which we just retry with a fresh max.
-        last_exc: IntegrityError | None = None
-        for _ in range(5):
-            try:
-                async with self.session.begin_nested():
-                    await self.session.execute(
-                        text(
-                            "INSERT INTO sem_revisions (entity_kind, entity_id, revision, payload, actor, reason)"
-                            " SELECT :ek, :eid, COALESCE(MAX(revision), 0) + 1, CAST(:p AS jsonb), :a, :r"
-                            " FROM sem_revisions WHERE entity_kind = :ek AND entity_id = :eid"
-                        ),
-                        params,
-                    )
-                return
-            except IntegrityError as exc:
-                last_exc = exc
-                continue
-        # Exhausted retries — don't swallow it: a lost revision means a missing
-        # rollback snapshot, which must surface rather than fail silently.
-        if last_exc is not None:
-            raise last_exc
-
-    async def get_revision(
-        self, *, entity_kind: str, entity_id: UUID, revision: int
-    ) -> dict[str, Any] | None:
-        row = (
-            await self.session.execute(
-                text(
-                    "SELECT revision, payload, actor, reason, created_at"
-                    " FROM sem_revisions"
-                    " WHERE entity_kind = :ek AND entity_id = :eid AND revision = :rev"
-                ),
-                {"ek": entity_kind, "eid": entity_id, "rev": revision},
-            )
-        ).mappings().first()
-        return dict(row) if row else None

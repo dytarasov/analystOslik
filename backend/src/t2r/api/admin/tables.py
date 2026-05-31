@@ -63,25 +63,6 @@ async def confirm_table(
     return await svc.confirm_table(table_id, login)
 
 
-@router.get("/tables/{table_id}/revisions")
-@inject
-async def list_table_revisions(
-    table_id: UUID, svc: FromDishka[SemanticService]
-) -> list[dict]:
-    return await svc.list_table_revisions(table_id)
-
-
-@router.post("/tables/{table_id}/revisions/{revision}/restore")
-@inject
-async def restore_table_revision(
-    table_id: UUID,
-    revision: int,
-    svc: FromDishka[SemanticService],
-    login: str = AdminDep,
-) -> dict:
-    return await svc.restore_table_revision(table_id, revision, login)
-
-
 class ColumnsToggle(BaseModel):
     names: list[str]
     enabled: bool

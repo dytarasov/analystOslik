@@ -444,11 +444,12 @@ class TaskService:
         """Re-execute an arbitrary SQL against the task's source (Jupyter-like).
 
         Reuses the SQL guard with the full semantic-layer whitelist for the
-        source. Overwrites preview / sql / rowcount / export_path on the
-        existing task_runs row so the XLSX download stays under the same URL.
+        source. Does NOT touch the task's stored result — each rerun is an
+        independent "cell": its rows are written to a uniquely-named export and
+        returned for the UI to append below the original answer.
         """
-        import json
         import os
+        from uuid import uuid4
 
         from t2r.errors import NotFoundError
         from t2r.infra.clickhouse.factory import CHClientFactory
@@ -508,39 +509,41 @@ class TaskService:
             "rows": [[_safe(v) for v in r] for r in preview_rows],
         }
 
-        export_path = os.path.join(self.settings.export_dir, f"task_{task_id}.xlsx")
+        # Jupyter-style: this rerun is an independent "cell". We never overwrite
+        # the task's canonical result (the agent's original answer stays put) —
+        # we just write this cell's rows to a uniquely-named export so it can be
+        # downloaded on its own, and hand the data back for the UI to append below.
+        cell_id = uuid4()
+        export_path = os.path.join(
+            self.settings.export_dir, f"task_{task_id}_cell_{cell_id}.xlsx"
+        )
         try:
             write_xlsx(export_path, columns=cols, rows=rows, title="report")
         except Exception:  # noqa: BLE001
             logger.exception("rerun_sql xlsx write failed")
             export_path = ""
 
-        async with self.sm() as s:
-            await s.execute(
-                text(
-                    "UPDATE task_runs SET status = 'done', result_sql = :sql,"
-                    " result_preview = CAST(:p AS jsonb), result_rowcount = :rc,"
-                    " export_path = :path, error = NULL, finished_at = now()"
-                    " WHERE id = :id"
-                ),
-                {
-                    "id": task_id,
-                    "sql": guarded.rewritten,
-                    "p": json.dumps(preview, default=str),
-                    "rc": len(rows),
-                    "path": export_path or None,
-                },
-            )
-            await s.commit()
-
-        export_url = f"/api/tasks/{task_id}/export.xlsx" if export_path else None
+        export_url = (
+            f"/api/tasks/{task_id}/cells/{cell_id}/export.xlsx" if export_path else None
+        )
         return {
             "ok": True,
+            "cell_id": str(cell_id),
             "sql": guarded.rewritten,
             "preview": preview,
             "rowcount": len(rows),
             "export_url": export_url,
         }
+
+    async def get_cell_export_path(self, task_id: UUID, cell_id: UUID) -> str | None:
+        """Path to a rerun cell's XLSX (server-generated UUIDs in the name keep
+        this safe from path traversal). None if it was never written."""
+        import os
+
+        path = os.path.join(
+            self.settings.export_dir, f"task_{task_id}_cell_{cell_id}.xlsx"
+        )
+        return path if os.path.exists(path) else None
 
 
 def _safe(v):

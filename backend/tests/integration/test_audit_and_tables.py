@@ -16,7 +16,7 @@ async def _login(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_table_writes_revision_and_returns_columns(
+async def test_update_table_and_returns_columns(
     app_client: httpx.AsyncClient, pg_dsn: str
 ) -> None:
     await _login(app_client)
@@ -57,17 +57,6 @@ async def test_update_table_writes_revision_and_returns_columns(
     )
     assert r.status_code == 200
     assert r.json()["description"] == "новое описание"
-
-    # revision row was written
-    conn = await asyncpg.connect(raw)
-    try:
-        cnt = await conn.fetchval(
-            "SELECT count(*) FROM sem_revisions WHERE entity_kind='sem_table' AND entity_id=$1",
-            tid,
-        )
-        assert cnt == 1
-    finally:
-        await conn.close()
 
     # confirm
     r = await app_client.post(f"/api/admin/tables/{tid}/confirm")

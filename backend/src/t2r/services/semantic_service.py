@@ -85,13 +85,6 @@ class SemanticService:
         prev = await self.repo.get_table(table_id)
         if not prev:
             raise NotFoundError("Таблица не найдена")
-        await self.repo.add_revision(
-            entity_kind="sem_table",
-            entity_id=table_id,
-            payload={k: prev[k] for k in ("title", "description", "domain", "tags", "user_notes")},
-            actor=actor,
-            reason=reason,
-        )
         await self.repo.update_table(
             table_id,
             title=title,
@@ -129,16 +122,6 @@ class SemanticService:
         prev = await self.repo.get_column(column_id)
         if not prev:
             raise NotFoundError("Колонка не найдена")
-        await self.repo.add_revision(
-            entity_kind="sem_column",
-            entity_id=column_id,
-            payload={
-                k: prev.get(k)
-                for k in ("description", "semantic_role", "user_notes")
-            },
-            actor=actor,
-            reason=reason,
-        )
         await self.repo.update_column(
             column_id,
             description=description,
@@ -165,7 +148,7 @@ class SemanticService:
     ) -> dict[str, Any]:
         """Exclude (or re-include) a column from downstream investigation, with
         the full cascade: flip the flag, drop/rebuild RAG notes, resync the graph
-        (prunes the node + its edges, or restores them), and snapshot a revision.
+        (prunes the node + its edges, or restores them).
 
         The hard facts stay in the row either way, so re-enabling is cheap. A
         re-enabled column that was never described keeps appearing draft until a
@@ -176,17 +159,6 @@ class SemanticService:
             raise NotFoundError("Колонка не найдена")
         source_id = col["source_id"]
         table_id = col["table_id"]
-
-        await self.repo.add_revision(
-            entity_kind="sem_column",
-            entity_id=column_id,
-            payload={
-                k: col.get(k) for k in ("description", "semantic_role", "user_notes")
-            }
-            | {"enabled": col.get("enabled")},
-            actor=actor,
-            reason=reason or ("отключение колонки" if not enabled else "включение колонки"),
-        )
 
         await self.repo.set_column_enabled(column_id, enabled)
 
@@ -234,53 +206,3 @@ class SemanticService:
         await self._rebuild_table_notes(table_id, source_id)
         await self._sync(source_id)
         return {"updated": n}
-
-    async def list_table_revisions(self, table_id: UUID) -> list[dict[str, Any]]:
-        return await self.repo.list_revisions(
-            entity_kind="sem_table", entity_id=table_id
-        )
-
-    async def list_column_revisions(self, column_id: UUID) -> list[dict[str, Any]]:
-        return await self.repo.list_revisions(
-            entity_kind="sem_column", entity_id=column_id
-        )
-
-    async def restore_table_revision(
-        self, table_id: UUID, revision: int, actor: str
-    ) -> dict[str, Any]:
-        rev = await self.repo.get_revision(
-            entity_kind="sem_table", entity_id=table_id, revision=revision
-        )
-        if not rev:
-            raise NotFoundError("Ревизия не найдена")
-        p = rev.get("payload") or {}
-        # Reuses update_table → snapshots the current state as a new revision,
-        # applies the old values, and resyncs the graph.
-        return await self.update_table(
-            table_id,
-            actor=actor,
-            title=p.get("title"),
-            description=p.get("description"),
-            domain=p.get("domain"),
-            tags=p.get("tags"),
-            user_notes=p.get("user_notes"),
-            reason=f"восстановление ревизии {revision}",
-        )
-
-    async def restore_column_revision(
-        self, column_id: UUID, revision: int, actor: str
-    ) -> dict[str, Any]:
-        rev = await self.repo.get_revision(
-            entity_kind="sem_column", entity_id=column_id, revision=revision
-        )
-        if not rev:
-            raise NotFoundError("Ревизия не найдена")
-        p = rev.get("payload") or {}
-        return await self.update_column(
-            column_id,
-            actor=actor,
-            description=p.get("description"),
-            semantic_role=p.get("semantic_role"),
-            user_notes=p.get("user_notes"),
-            reason=f"восстановление ревизии {revision}",
-        )

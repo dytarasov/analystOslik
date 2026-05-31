@@ -46,16 +46,6 @@ export function ColumnEditor({
   const [saving, setSaving] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [reprofiling, setReprofiling] = useState(false);
-  const [histOpen, setHistOpen] = useState(false);
-  const [revs, setRevs] = useState<
-    Array<{
-      id: string;
-      revision: number;
-      payload: Record<string, unknown>;
-      reason: string | null;
-      created_at: string;
-    }>
-  >([]);
   const task = useTask();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -178,29 +168,6 @@ export function ColumnEditor({
         notes || null,
       );
       task.start(`${API_URL}/api/admin/edit/agent-runs/${agent_run_id}/events`);
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
-    }
-  }
-
-  async function toggleHist() {
-    const next = !histOpen;
-    setHistOpen(next);
-    if (next) {
-      try {
-        setRevs(await api.columnRevisions(column.id));
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  async function restoreRev(revision: number) {
-    try {
-      const updated = await api.restoreColumnRevision(column.id, revision);
-      onUpdate(updated as SemColumn);
-      setRevs(await api.columnRevisions(column.id));
-      toast.success(`Восстановлена ревизия #${revision}`);
     } catch (err) {
       toast.error(err instanceof HttpError ? err.payload.message : "Ошибка");
     }
@@ -359,54 +326,12 @@ export function ColumnEditor({
           {column.distinct_count !== null && <span>distinct: {column.distinct_count}</span>}
           <button
             type="button"
-            onClick={toggleHist}
-            className="ml-auto hover:text-foreground"
-          >
-            {histOpen ? "скрыть историю" : "история"}
-          </button>
-          <button
-            type="button"
             onClick={() => setNotesOpen((v) => !v)}
-            className="hover:text-foreground"
+            className="ml-auto hover:text-foreground"
           >
             {notesOpen ? "скрыть комментарий" : column.user_notes ? "комментарий ✎" : "+ комментарий"}
           </button>
         </div>
-
-        {histOpen && (
-          <div className="mt-2 space-y-1.5 border-t pt-2">
-            {revs.length === 0 ? (
-              <p className="text-[10px] text-muted-foreground">История пуста</p>
-            ) : (
-              revs.map((r) => (
-                <div
-                  key={r.id}
-                  className="flex items-start justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-[10px]"
-                >
-                  <div className="min-w-0">
-                    <span className="font-medium">#{r.revision}</span>{" "}
-                    <span className="text-muted-foreground">
-                      {new Date(r.created_at).toLocaleString("ru-RU")}
-                      {r.reason && ` · ${r.reason}`}
-                    </span>
-                    <div className="truncate text-muted-foreground">
-                      {String(r.payload.description ?? "—")}
-                    </div>
-                  </div>
-                  <Tooltip label="Откатить колонку к этому состоянию">
-                    <button
-                      type="button"
-                      onClick={() => restoreRev(r.revision)}
-                      className="shrink-0 rounded border px-1.5 py-0.5 hover:bg-background"
-                    >
-                      ↺
-                    </button>
-                  </Tooltip>
-                </div>
-              ))
-            )}
-          </div>
-        )}
 
         {notesOpen && (
           <div className="mt-2 space-y-2">

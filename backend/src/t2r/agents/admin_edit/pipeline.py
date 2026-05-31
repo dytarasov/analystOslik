@@ -118,14 +118,6 @@ class _AdminEditStep(Step):
             return None
         updates = action.get("updates") or {}
         prev = await self.semantic_repo.get_table(table_id)
-        if prev:
-            await self.semantic_repo.add_revision(
-                entity_kind="sem_table",
-                entity_id=table_id,
-                payload={k: prev.get(k) for k in ("title", "description", "domain", "tags")},
-                actor=self.actor,
-                reason=reason,
-            )
         await self.semantic_repo.update_table(
             table_id,
             title=updates.get("title"),

@@ -128,3 +128,19 @@ async def export_xlsx(task_id: UUID, svc: FromDishka[TaskService]) -> FileRespon
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"task_{task_id}.xlsx",
     )
+
+
+@router.get("/tasks/{task_id}/cells/{cell_id}/export.xlsx")
+@inject
+async def export_cell_xlsx(
+    task_id: UUID, cell_id: UUID, svc: FromDishka[TaskService]
+) -> FileResponse:
+    """Download one Jupyter-style rerun cell's result (separate file per run)."""
+    path = await svc.get_cell_export_path(task_id, cell_id)
+    if not path or not os.path.exists(path):
+        raise NotFoundError("Export не найден или ещё не сформирован")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"task_{task_id}_cell_{cell_id}.xlsx",
+    )

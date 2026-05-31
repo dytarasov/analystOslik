@@ -91,7 +91,7 @@ async def _clean_db(pg_dsn: str) -> AsyncIterator[None]:
     try:
         await conn.execute(
             "TRUNCATE audit_log, llm_calls, task_runs, chat_messages, chat_sessions,"
-            " client_sessions_meta, md_notes, sem_revisions, sem_relations,"
+            " client_sessions_meta, md_notes, sem_relations,"
             " sem_columns, sem_tables, sem_metrics, sem_glossary,"
             " profiling_run_tables, profiling_runs, source_table_selections,"
             " data_sources RESTART IDENTITY CASCADE"
