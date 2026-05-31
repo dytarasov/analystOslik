@@ -55,6 +55,7 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 4096,
         openrouter_provider: str | None = None,
+        openrouter_pin: bool = False,
         request_timeout: float = 60.0,
         max_retries: int = 1,
     ) -> None:
@@ -71,16 +72,18 @@ class LLMClient:
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
-        # OpenRouter-specific routing: pin to a single upstream provider and
-        # disable fallbacks so requests only ever hit it. Merged into the JSON
-        # request body via the OpenAI SDK's ``extra_body``. ``None`` when unset,
-        # which the SDK simply ignores.
+        # OpenRouter routing. Default: no provider block → OpenRouter picks and
+        # falls back across providers, so a single provider throwing 429s/errors
+        # can't block us. Pinning is opt-in (openrouter_pin) and even then keeps
+        # ``allow_fallbacks: True`` — a *preference*, not a hard pin, so a sick
+        # preferred provider still degrades to others instead of failing. Merged
+        # into the request body via the OpenAI SDK's ``extra_body``.
         self._extra_body: dict[str, Any] | None = None
-        if openrouter_provider:
+        if openrouter_pin and openrouter_provider:
             self._extra_body = {
                 "provider": {
                     "order": [openrouter_provider],
-                    "allow_fallbacks": False,
+                    "allow_fallbacks": True,
                 }
             }
 

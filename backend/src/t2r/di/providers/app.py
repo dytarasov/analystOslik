@@ -69,6 +69,7 @@ class AppProvider(Provider):
             temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
             openrouter_provider=settings.llm_openrouter_provider,
+            openrouter_pin=settings.llm_openrouter_pin,
             request_timeout=settings.llm_request_timeout,
             max_retries=settings.llm_max_retries,
         )

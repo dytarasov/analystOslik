@@ -52,18 +52,30 @@ class Settings(BaseSettings):
     # ~14k chars of JSON output, which overran 8192 and got truncated → invalid
     # JSON. 16000 leaves comfortable headroom per chunk (measured ~9.8k tokens).
     llm_ingest_max_tokens: int = 16000
-    # Per-request HTTP timeout (seconds) and bounded retries for the LLM client.
-    # Без них AsyncOpenAI берёт дефолт 600с × 2 ретрая → зависший апстрим держит
-    # UI в спиннере минутами. 60с × (1+1) ограничивает один вызов ~2 минутами.
+    # Per-request HTTP timeout (seconds). The OpenAI SDK retries 429/5xx/timeout
+    # with exponential backoff (honouring Retry-After) up to max_retries — so this
+    # is our rate-limit handling for both the client answer loop and profiling.
+    # 3 absorbs transient 429s; combined with OpenRouter free-routing fallbacks a
+    # rate-limited provider is bypassed rather than failing the request.
     llm_request_timeout: float = 60.0
-    llm_max_retries: int = 1
-    # Pin OpenRouter routing to a single upstream provider (e.g. "Friendli").
-    # Empty/unset → OpenRouter picks the provider as usual. Accepts the bare
-    # LLM_OPENROUTER_PROVIDER as well as the prefixed T2R_ form.
+    llm_max_retries: int = 3
+    # Preferred OpenRouter upstream provider (e.g. "Friendli"). Only used when
+    # llm_openrouter_pin is true; otherwise ignored (free routing). Accepts the
+    # bare LLM_OPENROUTER_PROVIDER as well as the prefixed T2R_ form.
     llm_openrouter_provider: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
             "T2R_LLM_OPENROUTER_PROVIDER", "LLM_OPENROUTER_PROVIDER"
+        ),
+    )
+    # Whether to pin routing to llm_openrouter_provider. Default OFF: we let
+    # OpenRouter pick + fall back across providers, so one provider throwing 429s
+    # can't block us. Even when ON, fallbacks stay enabled (preference, not a hard
+    # pin) so a sick preferred provider still degrades gracefully.
+    llm_openrouter_pin: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "T2R_LLM_OPENROUTER_PIN", "LLM_OPENROUTER_PIN"
         ),
     )
 
