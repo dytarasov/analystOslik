@@ -53,3 +53,6 @@ data.zip
 
 # Logs
 *.log
+
+# Source data archives (не коммитить в публичный репо)
+*.csv.zip
