@@ -99,8 +99,10 @@ class GlossaryService:
 
         # Chunk the glossary by section and ingest each piece separately, then
         # merge the arrays. A single call on a big glossary overflowed the model's
-        # output budget → truncated, unparseable JSON. Per-section chunks keep
-        # every reply small; the downstream _ingest_* upserts dedup across chunks.
+        # output budget → truncated, unparseable JSON. Per chunk: one retry (the
+        # model occasionally returns empty content — transient), and a chunk that
+        # still won't parse is skipped with a warning rather than failing the whole
+        # ingest. The downstream _ingest_* upserts dedup across chunks.
         merged: dict[str, list[Any]] = {
             "glossary_terms": [],
             "metrics": [],
@@ -108,20 +110,49 @@ class GlossaryService:
             "columns": [],
             "relations": [],
         }
-        for chunk in chunk_markdown(glossary):
+        warnings: list[str] = []
+        # 4500-char chunks expand to well under the 16000-token output budget even
+        # for value_meanings-heavy sections (token-dense Cyrillic JSON ~1.5 ch/tok).
+        chunks = chunk_markdown(glossary, 4500)
+        any_ok = False
+        for idx, chunk in enumerate(chunks):
             prompt = self.prompts.render("glossary_ingest", glossary=chunk)
-            raw = await self.llm.complete(
-                [{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=self.ingest_max_tokens,
-            )
-            piece = _parse(raw)
+            piece: dict[str, Any] | None = None
+            for attempt in range(2):
+                raw = ""
+                try:
+                    raw = await self.llm.complete(
+                        [{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"},
+                        max_tokens=self.ingest_max_tokens,
+                    )
+                    piece = _parse(raw)
+                    break
+                except Exception as exc:  # noqa: BLE001 — one bad chunk must not kill ingest
+                    logger.warning(
+                        "glossary ingest: chunk failed",
+                        chunk=idx,
+                        attempt=attempt,
+                        raw_len=len(raw),
+                        raw_tail=raw[-180:],
+                        err=str(exc)[:200],
+                    )
+            if piece is None:
+                warnings.append(
+                    f"Фрагмент глоссария {idx + 1}/{len(chunks)} не разобрался — пропущен"
+                )
+                continue
+            any_ok = True
             for key in merged:
                 v = piece.get(key)
                 if isinstance(v, list):
                     merged[key].extend(v)
+        if not any_ok:
+            # Nothing parsed — don't wipe the existing semantic layer; surface why.
+            return GlossaryIngestResult(
+                ok=False, warnings=warnings or ["Не удалось разобрать глоссарий"]
+            )
         data = merged
-        warnings: list[str] = []
 
         # Full idempotency: wipe everything the previous glossary ingest wrote
         # (notes are cleared inside _ingest_notes) so this run fully replaces it,

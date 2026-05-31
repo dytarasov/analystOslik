@@ -70,15 +70,39 @@ class SqlNotesService:
         warnings: list[str] = []
         recipes: list[dict[str, Any]] = []
         # Same chunk-then-merge approach as the glossary: a big notes file would
-        # overflow the model's output budget in one call.
-        for chunk in chunk_markdown(notes):
+        # overflow the model's output budget in one call. Per chunk: one retry
+        # (the model occasionally returns empty content — transient); a chunk that
+        # still won't parse is skipped with a warning, not a whole-ingest failure.
+        chunks = chunk_markdown(notes, 4500)
+        any_ok = False
+        for idx, chunk in enumerate(chunks):
             prompt = self.prompts.render("sql_notes_ingest", sql_notes=chunk)
-            raw = await self.llm.complete(
-                [{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=self.ingest_max_tokens,
-            )
-            piece = _parse(raw)
+            piece: dict[str, Any] | None = None
+            for attempt in range(2):
+                raw = ""
+                try:
+                    raw = await self.llm.complete(
+                        [{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"},
+                        max_tokens=self.ingest_max_tokens,
+                    )
+                    piece = _parse(raw)
+                    break
+                except Exception as exc:  # noqa: BLE001 — one bad chunk must not kill ingest
+                    logger.warning(
+                        "sql notes ingest: chunk failed",
+                        chunk=idx,
+                        attempt=attempt,
+                        raw_len=len(raw),
+                        raw_tail=raw[-180:],
+                        err=str(exc)[:200],
+                    )
+            if piece is None:
+                warnings.append(
+                    f"Фрагмент SQL-заметок {idx + 1}/{len(chunks)} не разобрался — пропущен"
+                )
+                continue
+            any_ok = True
             for r in piece.get("recipes") or []:
                 sql = (r.get("sql") or "").strip()
                 if not sql:
@@ -91,6 +115,12 @@ class SqlNotesService:
                         "tables": [str(t) for t in (r.get("tables") or []) if t],
                     }
                 )
+
+        if not any_ok:
+            # Nothing parsed — don't wipe the existing recipes; surface why.
+            return SqlNotesIngestResult(
+                ok=False, warnings=warnings or ["Не удалось разобрать SQL-заметки"]
+            )
 
         # Embed the NL intent (fallback to title) — never the SQL.
         if recipes:
