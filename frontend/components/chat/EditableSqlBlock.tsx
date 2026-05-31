@@ -23,9 +23,15 @@ export type RerunResult = {
 // Pretty-print the query so a long one-liner becomes a readable, indented block
 // (SELECT columns each on their own line, clauses broken out). Best-effort: if the
 // formatter trips on ClickHouse-specific syntax, we keep the original text.
+//
+// keywordCase MUST stay "preserve": ClickHouse is case-sensitive for identifiers,
+// and "upper" uppercased aliases that collide with SQL keywords (e.g. an alias
+// `at` → `AT`) while leaving their dotted references (`at.col`) lowercase — a
+// case mismatch that ClickHouse rejects (UNKNOWN_IDENTIFIER). Preserving case
+// only re-indents; it never rewrites identifiers.
 function prettySql(raw: string): string {
   try {
-    return format(raw, { language: "sql", keywordCase: "upper", tabWidth: 2 });
+    return format(raw, { language: "sql", keywordCase: "preserve", tabWidth: 2 });
   } catch {
     return raw.trim();
   }
