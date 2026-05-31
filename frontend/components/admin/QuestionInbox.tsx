@@ -163,16 +163,22 @@ export function QuestionInbox({
                       </div>
                       {choices.length > 0 && (
                         <div className="flex flex-wrap gap-2">
-                          {choices.map((c) => (
-                            <Button
-                              key={c}
-                              size="sm"
-                              variant={value === c ? "default" : "outline"}
-                              onClick={() => setAnswer(g.task_id, i, c)}
-                            >
-                              {c}
-                            </Button>
-                          ))}
+                          {choices.map((c) => {
+                            const selected = value === c;
+                            return (
+                              <Button
+                                key={c}
+                                size="sm"
+                                variant={selected ? "default" : "outline"}
+                                // Toggle: clicking the selected choice clears it, so
+                                // the user can deselect and answer with free text.
+                                onClick={() => setAnswer(g.task_id, i, selected ? "" : c)}
+                                title={selected ? "Нажмите ещё раз, чтобы снять выбор" : undefined}
+                              >
+                                {c}
+                              </Button>
+                            );
+                          })}
                         </div>
                       )}
                       <Input
