@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { EditSourceDialog } from "@/components/admin/EditSourceDialog";
 import { GlossaryEditor } from "@/components/admin/GlossaryEditor";
 import { ProfilingStatusBadge } from "@/components/admin/ProfilingStatusBadge";
+import { SqlNotesEditor } from "@/components/admin/SqlNotesEditor";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -28,12 +29,38 @@ function formatBytes(n: number | null): string {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
+function KnowledgeTab({
+  active,
+  children,
+  onClick,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "border-b-2 px-3 py-2 text-sm transition " +
+        (active
+          ? "border-primary text-foreground"
+          : "border-transparent text-muted-foreground hover:text-foreground")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
 export default function SourceDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const sourceId = params.id;
 
   const [source, setSource] = useState<DataSource | null>(null);
+  const [knowledgeTab, setKnowledgeTab] = useState<"glossary" | "sql">("glossary");
   const [tables, setTables] = useState<SemTableRow[]>([]);
   const [runs, setRuns] = useState<ProfilingRun[]>([]);
   const [activeRun, setActiveRun] = useState<ActiveRun>(null);
@@ -441,7 +468,23 @@ export default function SourceDetailPage() {
         </Card>
       )}
 
-      {source && <GlossaryEditor source={source} onUpdated={setSource} />}
+      {source && (
+        <div className="space-y-3">
+          <div className="flex gap-1 border-b">
+            <KnowledgeTab active={knowledgeTab === "glossary"} onClick={() => setKnowledgeTab("glossary")}>
+              Глоссарий
+            </KnowledgeTab>
+            <KnowledgeTab active={knowledgeTab === "sql"} onClick={() => setKnowledgeTab("sql")}>
+              SQL-заметки
+            </KnowledgeTab>
+          </div>
+          {knowledgeTab === "glossary" ? (
+            <GlossaryEditor source={source} onUpdated={setSource} />
+          ) : (
+            <SqlNotesEditor source={source} onUpdated={setSource} />
+          )}
+        </div>
+      )}
 
       <section>
         <h2 className="mb-3 text-lg font-medium">Запуски профилирования</h2>

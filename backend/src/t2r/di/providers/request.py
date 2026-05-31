@@ -9,6 +9,7 @@ from t2r.infra.db.repos.profiling_repo_pg import ProfilingRepoPg
 from t2r.infra.db.repos.selection_repo_pg import SelectionRepoPg
 from t2r.infra.db.repos.semantic_repo_pg import SemanticRepoPg
 from t2r.infra.db.repos.source_repo_pg import SourceRepoPg
+from t2r.infra.db.repos.sql_recipe_repo_pg import SqlRecipeRepoPg
 from t2r.infra.graph.repo import GraphRepoNeo4j
 from t2r.infra.llm.embeddings import EmbeddingsClient
 from t2r.infra.llm.openai_client import LLMClient
@@ -18,6 +19,8 @@ from t2r.services.glossary_service import GlossaryService
 from t2r.services.semantic_service import SemanticService
 from t2r.services.session_service import SessionService
 from t2r.services.source_service import SourceService
+from t2r.services.sql_notes_service import SqlNotesService
+from t2r.settings import Settings
 
 
 class RequestProvider(Provider):
@@ -48,6 +51,10 @@ class RequestProvider(Provider):
         return NotesRepoPg(session)
 
     @provide
+    def sql_recipe_repo(self, session: AsyncSession) -> SqlRecipeRepoPg:
+        return SqlRecipeRepoPg(session)
+
+    @provide
     def profiling_repo(self, session: AsyncSession) -> ProfilingRepoPg:
         return ProfilingRepoPg(session)
 
@@ -75,6 +82,7 @@ class RequestProvider(Provider):
         emb: EmbeddingsClient,
         llm: LLMClient,
         prompts: PromptLoader,
+        settings: Settings,
     ) -> GlossaryService:
         return GlossaryService(
             source_repo=source_repo,
@@ -84,6 +92,26 @@ class RequestProvider(Provider):
             embeddings=emb,
             llm=llm,
             prompts=prompts,
+            ingest_max_tokens=settings.llm_ingest_max_tokens,
+        )
+
+    @provide
+    def sql_notes_service(
+        self,
+        source_repo: SourceRepoPg,
+        sql_recipe_repo: SqlRecipeRepoPg,
+        emb: EmbeddingsClient,
+        llm: LLMClient,
+        prompts: PromptLoader,
+        settings: Settings,
+    ) -> SqlNotesService:
+        return SqlNotesService(
+            source_repo=source_repo,
+            sql_recipe_repo=sql_recipe_repo,
+            embeddings=emb,
+            llm=llm,
+            prompts=prompts,
+            ingest_max_tokens=settings.llm_ingest_max_tokens,
         )
 
     @provide

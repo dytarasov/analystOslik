@@ -5,6 +5,7 @@ import type {
   DataSourceCreate,
   DataSourceUpdate,
   GlossaryIngestResult,
+  SqlNotesIngestResult,
   TestConnectionResult,
 } from "@/lib/types";
 
@@ -213,6 +214,11 @@ export const api = {
     ingestGlossary: (id: string) =>
       request<GlossaryIngestResult>(
         `/api/admin/sources/${id}/glossary/ingest`,
+        { method: "POST" },
+      ),
+    ingestSqlNotes: (id: string) =>
+      request<SqlNotesIngestResult>(
+        `/api/admin/sources/${id}/sql-notes/ingest`,
         { method: "POST" },
       ),
     testConnection: (id: string) =>

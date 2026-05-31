@@ -24,6 +24,8 @@ export type DataSource = {
   profiling_status: ProfilingStatus;
   glossary_md: string | null;
   glossary_ingested_at: string | null;
+  sql_notes_md: string | null;
+  sql_notes_ingested_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -35,6 +37,12 @@ export type GlossaryIngestResult = {
   terms: number;
   columns: number;
   relations: number;
+  warnings: string[];
+};
+
+export type SqlNotesIngestResult = {
+  ok: boolean;
+  recipes: number;
   warnings: string[];
 };
 
@@ -62,6 +70,8 @@ export type DataSourceUpdate = {
   extra_settings?: Record<string, unknown>;
   // Provided (even "") sets the glossary; omitted leaves it unchanged.
   glossary_md?: string;
+  // Same semantics as glossary_md, for the separate SQL-notes area.
+  sql_notes_md?: string;
 };
 
 export type TestConnectionResult = {

@@ -38,6 +38,9 @@ class DataSourceUpdate(BaseModel):
     extra_settings: dict[str, Any] | None = None
     # Provided (even as "") → glossary is set. Omitted/None → left unchanged.
     glossary_md: str | None = None
+    # Same semantics as glossary_md: typical SQL recipes, kept separate so they
+    # don't bloat the prompt-injected glossary.
+    sql_notes_md: str | None = None
 
 
 class DataSource(BaseModel):
@@ -59,6 +62,8 @@ class DataSource(BaseModel):
     profiling_status: str = "never_profiled"
     glossary_md: str | None = None
     glossary_ingested_at: datetime | None = None
+    sql_notes_md: str | None = None
+    sql_notes_ingested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -70,6 +75,12 @@ class GlossaryIngestResult(BaseModel):
     terms: int = 0
     columns: int = 0
     relations: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SqlNotesIngestResult(BaseModel):
+    ok: bool
+    recipes: int = 0
     warnings: list[str] = Field(default_factory=list)
 
 

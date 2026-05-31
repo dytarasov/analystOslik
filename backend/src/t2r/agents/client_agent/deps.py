@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from t2r.infra.clickhouse.factory import CHClientFactory
 from t2r.infra.db.repos.notes_repo_pg import NotesRepoPg
 from t2r.infra.db.repos.semantic_repo_pg import SemanticRepoPg
+from t2r.infra.db.repos.sql_recipe_repo_pg import SqlRecipeRepoPg
 from t2r.infra.graph.repo import GraphRepoNeo4j
 from t2r.infra.llm.embeddings import EmbeddingsClient
 from t2r.infra.llm.openai_client import LLMClient
@@ -24,6 +25,7 @@ class ClientAgentDeps:
         ch_factory: CHClientFactory,
         semantic_repo: SemanticRepoPg,
         notes_repo: NotesRepoPg,
+        sql_recipe_repo: SqlRecipeRepoPg,
         graph_repo: GraphRepoNeo4j,
         session: AsyncSession,
         llm: LLMClient,
@@ -38,6 +40,7 @@ class ClientAgentDeps:
         self.ch_factory = ch_factory
         self.semantic_repo = semantic_repo
         self.notes_repo = notes_repo
+        self.sql_recipe_repo = sql_recipe_repo
         self.graph_repo = graph_repo
         self.session = session
         self.llm = llm

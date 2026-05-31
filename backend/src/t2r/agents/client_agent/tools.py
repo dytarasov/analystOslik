@@ -194,6 +194,31 @@ async def _search_knowledge(ctx: ToolContext, args: dict[str, Any]) -> Any:
     }
 
 
+async def _find_sql_recipes(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    intent = (args.get("intent") or "").strip()
+    repo = ctx.deps.sql_recipe_repo
+    recipes: list[dict[str, Any]] = []
+    if intent:
+        try:
+            emb = await ctx.deps.embeddings.embed(intent)
+            recipes = await repo.search_recipes(ctx.source_id, emb, limit=5)
+        except Exception:  # noqa: BLE001 — degrade to listing all on embed failure
+            recipes = await repo.list_recipes(ctx.source_id)
+    else:
+        recipes = await repo.list_recipes(ctx.source_id)
+    return {
+        "recipes": [
+            {
+                "title": r.get("title"),
+                "intent": r.get("intent"),
+                "sql": r.get("sql"),
+                "tables": list(r.get("tables") or []),
+            }
+            for r in recipes
+        ]
+    }
+
+
 async def _find_relations(ctx: ToolContext, args: dict[str, Any]) -> Any:
     qname = (args.get("qname") or "").strip()
     t = ctx.resolve_qname(qname)
@@ -502,6 +527,28 @@ def build_registry() -> dict[str, Tool]:
             ),
             handler=_search_knowledge,
             label=lambda a: f"Ищу в заметках: {(a.get('query') or '')[:40]}",
+        ),
+        Tool(
+            name="find_sql_recipes",
+            schema=_fn(
+                "find_sql_recipes",
+                "ОБЯЗАТЕЛЬНО перед confirm_plan/run_sql: проверить типовые SQL-рецепты "
+                "источника по смыслу задачи. Возвращает готовые эталонные запросы "
+                "(название, когда применять, дословный SQL). Если подходящий рецепт "
+                "есть — бери его SQL за основу, а не изобретай свой.",
+                {
+                    "type": _OBJ,
+                    "properties": {
+                        "intent": {
+                            **_STR,
+                            "description": "смысл задачи на естественном языке",
+                        }
+                    },
+                    "required": ["intent"],
+                },
+            ),
+            handler=_find_sql_recipes,
+            label=lambda a: f"Ищу SQL-рецепты: {(a.get('intent') or '')[:40]}",
         ),
         Tool(
             name="find_relations",

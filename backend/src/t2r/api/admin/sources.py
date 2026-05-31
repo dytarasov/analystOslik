@@ -9,10 +9,12 @@ from t2r.domain.models.source import (
     DataSourceCreate,
     DataSourceUpdate,
     GlossaryIngestResult,
+    SqlNotesIngestResult,
     TestConnectionResult,
 )
 from t2r.services.glossary_service import GlossaryService
 from t2r.services.source_service import SourceService
+from t2r.services.sql_notes_service import SqlNotesService
 
 router = APIRouter(prefix="/api/admin/sources", tags=["admin-sources"], dependencies=[AdminDep])
 
@@ -60,6 +62,16 @@ async def ingest_glossary(
 ) -> GlossaryIngestResult:
     """Decompose the source's glossary into the semantic layer (terms, metrics,
     embedded notes, relations) for on-demand retrieval by the agent."""
+    return await svc.ingest(source_id)
+
+
+@router.post("/{source_id}/sql-notes/ingest", response_model=SqlNotesIngestResult)
+@inject
+async def ingest_sql_notes(
+    source_id: UUID, svc: FromDishka[SqlNotesService]
+) -> SqlNotesIngestResult:
+    """Parse the source's free-form SQL notes into typical-query recipes that the
+    agent retrieves via find_sql_recipes before writing SQL."""
     return await svc.ingest(source_id)
 
 

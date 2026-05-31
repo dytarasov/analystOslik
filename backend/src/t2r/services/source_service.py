@@ -59,6 +59,7 @@ class SourceService:
             secure=payload.secure,
             extra_settings=payload.extra_settings,
             glossary_md=payload.glossary_md,
+            sql_notes_md=payload.sql_notes_md,
         )
         if not updated:
             raise NotFoundError("Источник не найден")

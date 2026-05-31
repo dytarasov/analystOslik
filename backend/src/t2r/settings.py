@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     llm_model: str
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
+    # Glossary / SQL-notes ingest emits a larger JSON payload than a normal call;
+    # the default 4096 truncated it on big inputs → invalid JSON. Combined with
+    # per-section chunking, this keeps each chunk's output well within budget.
+    llm_ingest_max_tokens: int = 8192
     # Per-request HTTP timeout (seconds) and bounded retries for the LLM client.
     # Без них AsyncOpenAI берёт дефолт 600с × 2 ретрая → зависший апстрим держит
     # UI в спиннере минутами. 60с × (1+1) ограничивает один вызов ~2 минутами.

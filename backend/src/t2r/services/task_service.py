@@ -16,6 +16,7 @@ from t2r.agents.orchestrator.run import AgentRun
 from t2r.infra.clickhouse.factory import CHClientFactory
 from t2r.infra.db.repos.notes_repo_pg import NotesRepoPg
 from t2r.infra.db.repos.semantic_repo_pg import SemanticRepoPg
+from t2r.infra.db.repos.sql_recipe_repo_pg import SqlRecipeRepoPg
 from t2r.infra.db.repos.source_repo_pg import SourceRepoPg
 from t2r.infra.graph.repo import GraphRepoNeo4j
 from t2r.infra.llm.embeddings import EmbeddingsClient
@@ -218,6 +219,7 @@ class TaskService:
                     ch_factory=CHClientFactory(SourceRepoPg(session, self.cipher)),
                     semantic_repo=SemanticRepoPg(session),
                     notes_repo=NotesRepoPg(session),
+                    sql_recipe_repo=SqlRecipeRepoPg(session),
                     graph_repo=GraphRepoNeo4j(self.neo4j),
                     session=session,
                     llm=self.llm,

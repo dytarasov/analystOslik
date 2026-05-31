@@ -16,6 +16,7 @@ from t2r.infra.llm.json_extractor import extract_json
 from t2r.infra.llm.openai_client import LLMClient
 from t2r.infra.llm.prompt_loader import PromptLoader
 from t2r.logging import get_logger
+from t2r.services.ingest_chunking import chunk_markdown
 
 logger = get_logger("glossary.ingest")
 
@@ -51,6 +52,7 @@ class GlossaryService:
         embeddings: EmbeddingsClient,
         llm: LLMClient,
         prompts: PromptLoader,
+        ingest_max_tokens: int = 8192,
     ) -> None:
         self.source_repo = source_repo
         self.semantic_repo = semantic_repo
@@ -59,6 +61,7 @@ class GlossaryService:
         self.embeddings = embeddings
         self.llm = llm
         self.prompts = prompts
+        self.ingest_max_tokens = ingest_max_tokens
 
     async def ingest(self, source_id: UUID) -> GlossaryIngestResult:
         src = await self.source_repo.get(source_id)
@@ -94,12 +97,30 @@ class GlossaryService:
                 ],
             )
 
-        prompt = self.prompts.render("glossary_ingest", glossary=glossary)
-        raw = await self.llm.complete(
-            [{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        data = _parse(raw)
+        # Chunk the glossary by section and ingest each piece separately, then
+        # merge the arrays. A single call on a big glossary overflowed the model's
+        # output budget → truncated, unparseable JSON. Per-section chunks keep
+        # every reply small; the downstream _ingest_* upserts dedup across chunks.
+        merged: dict[str, list[Any]] = {
+            "glossary_terms": [],
+            "metrics": [],
+            "notes": [],
+            "columns": [],
+            "relations": [],
+        }
+        for chunk in chunk_markdown(glossary):
+            prompt = self.prompts.render("glossary_ingest", glossary=chunk)
+            raw = await self.llm.complete(
+                [{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=self.ingest_max_tokens,
+            )
+            piece = _parse(raw)
+            for key in merged:
+                v = piece.get(key)
+                if isinstance(v, list):
+                    merged[key].extend(v)
+        data = merged
         warnings: list[str] = []
 
         # Full idempotency: wipe everything the previous glossary ingest wrote
