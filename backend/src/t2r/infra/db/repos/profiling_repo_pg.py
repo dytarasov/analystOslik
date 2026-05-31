@@ -94,6 +94,24 @@ class ProfilingRepoPg:
             {"id": run_id},
         )
 
+    async def try_resume_from_terminal(self, run_id: UUID) -> UUID | None:
+        """Atomically re-activate a cancelled/failed run for resume (→ running),
+        clearing the error/finished_at. Returns source_id, or None if the run was
+        not in a resumable terminal state (already active, or finished 'done').
+        One caller wins, so a double-click can't spawn two resume drains."""
+        row = (
+            await self.session.execute(
+                text(
+                    "UPDATE profiling_runs SET status = 'running', error = NULL,"
+                    " finished_at = NULL"
+                    " WHERE id = :id AND status IN ('cancelled', 'failed')"
+                    " RETURNING source_id"
+                ),
+                {"id": run_id},
+            )
+        ).first()
+        return row[0] if row else None
+
     async def create_run(
         self, source_id: UUID, *, requested_by: str | None, params: dict
     ) -> UUID:

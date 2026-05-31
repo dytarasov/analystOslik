@@ -343,12 +343,7 @@ class ProfilingService:
             logger.info("v2: paused at column-selection gate", run_id=str(run_id_db))
             return
         except asyncio.CancelledError:
-            try:
-                async with self.sm() as s:
-                    await ProfilingRepoPg(s).set_status(run_id_db, "cancelled", error="cancelled_by_user")
-                    await s.commit()
-            except Exception:
-                logger.exception("v2: cancel persist failed")
+            await self._persist_user_cancel(run_id_db, agent_run)
         except Exception as exc:  # noqa: BLE001
             logger.exception("v2: pipeline failed", run_id=str(run_id_db))
             try:
@@ -476,6 +471,43 @@ class ProfilingService:
         self._spawn(self._continue(source_id, run_id_db))
         return {"ok": True, "run_id": str(run_id_db)}
 
+    async def resume_run(self, run_id_db: UUID) -> dict:
+        """Re-activate a terminated (cancelled/failed) run that still has
+        unfinished tasks and drain it to completion off the durable queue,
+        preserving the work already done — instead of forcing a full re-profile.
+        A redeploy/restart mid-pass-2 leaves a run exactly like this."""
+        from t2r.errors import NotFoundError, ValidationError
+
+        async with self.sm() as s:
+            prepo = ProfilingRepoPg(s)
+            run = await prepo.get_run(run_id_db)
+            if not run:
+                raise NotFoundError("Запуск не найден")
+            counts = await ProfilingTaskRepo(s).counts(run_id_db)
+            unfinished = (
+                counts.get("pending", 0)
+                + counts.get("awaiting_input", 0)
+                + counts.get("running", 0)
+            )
+            if unfinished == 0:
+                raise ValidationError(
+                    "В этом запуске нет незавершённых задач — возобновлять нечего"
+                )
+            # Atomic claim cancelled/failed → running (one caller wins).
+            source_id = await prepo.try_resume_from_terminal(run_id_db)
+            if source_id is None:
+                raise ValidationError(
+                    "Этот запуск нельзя возобновить (уже активен или успешно завершён)"
+                )
+            await s.commit()
+        logger.info("v2: resume requested", run_id=str(run_id_db), unfinished=unfinished)
+        await self._sync_status(source_id)
+        # Drain the existing pass-2 tasks (no re-seed); parks again on any
+        # still-open questions. agent_run is gone after a restart — _continue
+        # handles that (drains headless; the run page polls progress).
+        self._spawn(self._continue(source_id, run_id_db))
+        return {"ok": True, "run_id": str(run_id_db)}
+
     async def _continue(self, source_id: UUID, run_id_db: UUID) -> None:
         from t2r.agents.admin_profiling.pass2 import Pass2Deps, continue_pass2
 
@@ -512,17 +544,9 @@ class ProfilingService:
                 )
                 await self._maybe_finish(source_id, run_id_db, agent_run)
             except asyncio.CancelledError:
-                # Deliberate cancel: persist a terminal status (fresh session — the
-                # surrounding one may be aborted) so the run never wedges in
-                # 'running', then re-raise. Mirrors _run_pipeline_v2.
-                try:
-                    async with self.sm() as s:
-                        await ProfilingRepoPg(s).set_status(
-                            run_id_db, "cancelled", error="cancelled_by_user"
-                        )
-                        await s.commit()
-                except Exception:
-                    logger.exception("v2: continue cancel-persist failed", run_id=str(run_id_db))
+                # Only a real user cancel becomes terminal 'cancelled'; a shutdown
+                # leaves the run resumable. Then re-raise. Mirrors _run_pipeline_v2.
+                await self._persist_user_cancel(run_id_db, agent_run)
                 raise
             except Exception as exc:  # noqa: BLE001
                 # Don't leave the run wedged in 'running' forever — mark it failed.
@@ -728,18 +752,9 @@ class ProfilingService:
                     )
                 await self._maybe_finish(source_id, run_id_db, agent_run)
             except asyncio.CancelledError:
-                # Deliberate cancel mid pass-2: persist 'cancelled' (fresh session)
-                # so the run doesn't wedge in 'running', then re-raise. Without
-                # this the CancelledError propagates uncaught and the slot stays
-                # held until a restart. Mirrors _run_pipeline_v2.
-                try:
-                    async with self.sm() as s:
-                        await ProfilingRepoPg(s).set_status(
-                            run_id_db, "cancelled", error="cancelled_by_user"
-                        )
-                        await s.commit()
-                except Exception:
-                    logger.exception("v2: gate-resume cancel-persist failed", run_id=str(run_id_db))
+                # Only a real user cancel becomes terminal 'cancelled'; a shutdown
+                # leaves the run resumable. Then re-raise.
+                await self._persist_user_cancel(run_id_db, agent_run)
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.exception("v2: continue_after_gate failed", run_id=str(run_id_db))
@@ -798,6 +813,31 @@ class ProfilingService:
                 await s.commit()
         except Exception:
             logger.exception("v2: source status sync failed")
+
+    async def _persist_user_cancel(
+        self, run_id_db: UUID, agent_run: AgentRun | None
+    ) -> None:
+        """Persist 'cancelled' ONLY for a genuine user cancel (run.cancel() sets
+        cancel_event). A process shutdown / redeploy ALSO raises CancelledError in
+        the drain coroutine, but that must NOT be recorded as 'cancelled_by_user'
+        and must leave the run resumable — so we skip the write and let it stay
+        'running' for startup-recovery to mark abandoned (and the admin to
+        resume). This is why a redeploy mid-pass-2 stopped falsely showing the run
+        as user-cancelled."""
+        if agent_run is None or not agent_run.cancel_event.is_set():
+            logger.warning(
+                "v2: drain CancelledError from shutdown (not user) — leaving resumable",
+                run_id=str(run_id_db),
+            )
+            return
+        try:
+            async with self.sm() as s:
+                await ProfilingRepoPg(s).set_status(
+                    run_id_db, "cancelled", error="cancelled_by_user"
+                )
+                await s.commit()
+        except Exception:
+            logger.exception("v2: cancel-persist failed", run_id=str(run_id_db))
 
     async def reprofile_column(self, column_id: UUID, *, actor: str) -> dict:
         """Deep-(re)profile a single column: ensure it's enabled, run the LLM

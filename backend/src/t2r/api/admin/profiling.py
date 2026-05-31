@@ -85,6 +85,15 @@ async def run_progress(run_id: UUID, svc: FromDishka[ProfilingService]) -> dict:
     return await svc.get_progress(run_id)
 
 
+@router.post("/runs/{run_id}/resume")
+@inject
+async def resume_run(run_id: UUID, svc: FromDishka[ProfilingService]) -> dict:
+    """Resume a cancelled/failed run that still has unfinished tasks — e.g. after
+    a redeploy/restart interrupted pass-2 — continuing off the durable queue
+    instead of re-profiling from scratch."""
+    return await svc.resume_run(run_id)
+
+
 @router.get("/runs")
 @inject
 async def list_runs(source_id: UUID, svc: FromDishka[ProfilingService]) -> list[dict]:

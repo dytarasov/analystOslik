@@ -294,6 +294,11 @@ export const api = {
       ),
     progress: (run_id: string) =>
       request<ProfilingProgress>(`/api/admin/profiling/runs/${run_id}/progress`),
+    resume: (run_id: string) =>
+      request<{ ok: boolean; run_id: string }>(
+        `/api/admin/profiling/runs/${run_id}/resume`,
+        { method: "POST" },
+      ),
     answerTask: (
       task_id: string,
       answers: { column?: string | null; text?: string | null; answer: string }[],

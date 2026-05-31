@@ -61,6 +61,16 @@ export default function ProfilingRunPage() {
     }
   }
 
+  async function onResume() {
+    try {
+      await api.profiling.resume(runId);
+      toast.success("Возобновляю профилирование");
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.payload.message : "Не удалось возобновить");
+    }
+  }
+
   const counts = progress?.counts ?? {};
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const done = (counts.done ?? 0) + (counts.skipped ?? 0);
@@ -69,16 +79,26 @@ export default function ProfilingRunPage() {
   const cov = progress?.coverage;
   const status = progress?.status ?? "running";
   const active = ACTIVE.has(status) && !progress?.coverage?.complete;
+  const terminal = status === "done" || status === "failed" || status === "cancelled";
+  const unfinished =
+    (counts.pending ?? 0) + (counts.awaiting_input ?? 0) + (counts.running ?? 0);
+  // A cancelled/failed run that still has unfinished work can be continued off
+  // the durable queue (e.g. after a redeploy interrupted pass-2) — no re-profile.
+  const resumable = (status === "cancelled" || status === "failed") && unfinished > 0;
   const phase =
     status === "done"
       ? "Готово"
-      : status === "paused"
-        ? "Выберите колонки"
-        : awaiting > 0
-          ? "Ожидают ваших ответов"
-          : (counts.running ?? 0) > 0 || (counts.pending ?? 0) > 0
-            ? "В работе"
-            : "Готовлюсь";
+      : status === "cancelled"
+        ? "Прервано"
+        : status === "failed"
+          ? "Ошибка"
+          : status === "paused"
+            ? "Выберите колонки"
+            : awaiting > 0
+              ? "Ожидают ваших ответов"
+              : (counts.running ?? 0) > 0 || (counts.pending ?? 0) > 0
+                ? "В работе"
+                : "Готовлюсь";
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -95,6 +115,8 @@ export default function ProfilingRunPage() {
           <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
             {status === "done" ? (
               <CheckCircle2 className="h-4 w-4 text-success" />
+            ) : status === "cancelled" || status === "failed" ? (
+              <X className="h-4 w-4 text-destructive" />
             ) : (
               <Loader2 className="h-4 w-4 animate-spin text-primary" />
             )}
@@ -149,8 +171,26 @@ export default function ProfilingRunPage() {
         <ColumnSelectionGate runId={runId} onResume={refresh} />
       )}
 
-      {progress && progress.questions.length > 0 && (
+      {progress && progress.questions.length > 0 && !terminal && (
         <QuestionInbox groups={progress.questions} onAnswer={onAnswer} />
+      )}
+
+      {resumable && (
+        <Card className="border-warning/40 bg-warning/5">
+          <CardContent className="flex flex-wrap items-center gap-3 py-4 text-sm">
+            <X className="h-5 w-5 shrink-0 text-destructive" />
+            <span className="min-w-0">
+              {status === "cancelled"
+                ? "Прогон прерван (возможно, перезапуском сервера)."
+                : "Прогон завершился с ошибкой."}{" "}
+              Незавершённых задач: <b>{unfinished}</b>. Сделанное сохранено — можно
+              продолжить без полного перепрофилирования.
+            </span>
+            <Button onClick={onResume} className="ml-auto gap-1.5">
+              Возобновить
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       {progress && progress.tasks.length > 0 && (
